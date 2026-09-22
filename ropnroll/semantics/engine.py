@@ -356,7 +356,11 @@ class SemanticEngine:
                 roles[r] = "data"
 
         n_variants = len(_K_DATA_BASIS_TEMPLATE)
-        candidates = list(read_regs)
+        # deterministic order: when a tie between candidate source
+        # registers is possible, iterating a set here would let Python's
+        # per-process string-hash randomization silently pick a different
+        # (still-correct, but different) attribution between runs.
+        candidates = sorted(read_regs)
 
         # baseline trial (variant=1 for everyone) establishes fault-free sanity
         base_ok, base_finals, base_writes, base_reads = self._run_trial(

@@ -238,11 +238,22 @@ def set_registers(pool: GadgetPool, targets: dict[str, int],
 
     # ---- phase 1: greedy multi-cover "pop"-style (LOAD-from-stack) gadgets
     while remaining:
-        cand_gadgets: set[Gadget] = set()
+        # a *set* of candidates would iterate in an order that depends on
+        # Gadget.__hash__, which folds in a module-path string -- and
+        # Python randomizes str hashing per-process (PYTHONHASHSEED)
+        # unless told not to. That made tie-breaking between equally-good
+        # candidates (same coverage, same instruction count) silently
+        # nondeterministic run to run: confirmed in CI, where four
+        # identical jobs against the identical system libc picked
+        # different gadgets and only some verified cleanly. Dedup via a
+        # dict keyed by (module, address) instead, and iterate in a fixed
+        # sort order, so the same input always makes the same choice.
+        cand_gadgets: dict[tuple[str, int], Gadget] = {}
         for reg in remaining:
-            cand_gadgets.update(pool.shortlist_pop_style(reg, max_insns=max_insns))
+            for g in pool.shortlist_pop_style(reg, max_insns=max_insns):
+                cand_gadgets[(g.module, g.address)] = g
         best = None  # (score, gadget, effect, covers)
-        for g in cand_gadgets:
+        for g in sorted(cand_gadgets.values(), key=lambda g: (g.module, g.address)):
             eff = pool.effect_of(g)
             if not _gadget_ok(eff, ai):
                 continue

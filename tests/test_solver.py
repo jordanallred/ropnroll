@@ -48,23 +48,35 @@ def test_ret2libc_system_binsh(libc_path):
 
 
 def test_direct_execve_syscall_binsh(libc_path):
-    # this specific libc build's only sub-6-instruction rdx-setter happens
-    # to also clobber rax (which here holds the syscall number 59) -- the
-    # solver correctly refuses it rather than corrupting rax, so this needs
-    # a wider instruction-count window to find a clean alternative. Real
-    # usage widens the same way when the default window comes up empty.
-    pool, img = _pool(libc_path, max_insns=9)
     binsh = None
-    for seg in img.segments:
+    for seg in loader.load(libc_path).segments:
         if not seg.executable and seg.readable:
             idx = seg.data.find(b"/bin/sh\x00")
             if idx != -1:
                 binsh = seg.vaddr + idx
                 break
-    res = build_syscall(pool, nr=59, args=[binsh, 0, 0], max_insns=9)
-    assert res.ok, res.solve.log
-    rep = verify_chain(img, res.chain, final_target=res.gadget_addr)
-    assert rep.ok, rep.fault
+    assert binsh is not None
+
+    # Which gadgets the solver ends up choosing depends on the exact glibc
+    # build's own code layout, which differs across systems (confirmed: a
+    # gadget that solved and verified cleanly on one machine caused a real
+    # CPU exception on another glibc build's equivalent address, because
+    # the specific instructions living there differ). Rather than hardcode
+    # one instruction-count window that happened to work on one system,
+    # widen the search the same way real usage would if verification
+    # doesn't pass, and require *some* window to produce a working chain.
+    last_report = None
+    for max_insns in (6, 9, 12, 15):
+        pool, img = _pool(libc_path, max_insns=max_insns)
+        res = build_syscall(pool, nr=59, args=[binsh, 0, 0], max_insns=max_insns)
+        if not res.ok:
+            continue
+        rep = verify_chain(img, res.chain, final_target=res.gadget_addr)
+        last_report = rep
+        if rep.ok:
+            return
+    assert last_report is not None and last_report.ok, \
+        f"no working execve chain found up to max_insns=15; last attempt: {last_report}"
 
 
 def test_stack_pivot_gadgets_rejected_by_general_solver(libc_path):

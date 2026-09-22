@@ -30,6 +30,7 @@ import capstone as cs
 import unicorn as uc
 
 from ..core.archinfo import ArchInfo
+from ..core.cache import EffectDiskCache
 from ..core.gadget import Gadget
 from ..core.loader import Image
 from .effect import EKind, GadgetEffect, MemEffect, RegEffect
@@ -100,6 +101,11 @@ STACK_SIZE = 0x8000
 SCRATCH_LANE_SIZE = 0x1000
 MAX_SCRATCH_LANES = 16
 
+# Bumped whenever the trial/fitting logic below changes semantics, so a
+# persisted EffectDiskCache from an older version is treated as cold instead
+# of silently serving stale results (see core/cache.py).
+SEMANTIC_ENGINE_VERSION = 1
+
 
 def _align_down(x, a):
     return x & ~(a - 1)
@@ -117,12 +123,13 @@ def _fill_pattern(size: int) -> bytes:
 
 
 class SemanticEngine:
-    def __init__(self, img: Image, ai: ArchInfo):
+    def __init__(self, img: Image, ai: ArchInfo, disk_cache: Optional[EffectDiskCache] = None):
         self.img = img
         self.ai = ai
         self.width_bytes = ai.reg_width
         self.mask = (1 << (self.width_bytes * 8)) - 1
         self._cache: dict[bytes, GadgetEffect] = {}
+        self._disk_cache = disk_cache
         self._subreg_map = _build_x86_subreg_map(ai.bits) if ai.cs_arch == cs.CS_ARCH_X86 else {}
         self.mu = uc.Uc(ai.uc_arch, ai.uc_mode)
         self._map_image()
@@ -336,10 +343,21 @@ class SemanticEngine:
                 return EKind.SCALE, k, c
         return None
 
+    def _store(self, gadget: Gadget, eff: GadgetEffect) -> GadgetEffect:
+        self._cache[gadget.raw] = eff
+        if self._disk_cache is not None:
+            self._disk_cache.put(gadget.raw, eff)
+        return eff
+
     def compute(self, gadget: Gadget) -> GadgetEffect:
         cached = self._cache.get(gadget.raw)
         if cached is not None:
             return cached
+        if self._disk_cache is not None:
+            cached = self._disk_cache.get(gadget.raw)
+            if cached is not None:
+                self._cache[gadget.raw] = cached
+                return cached
 
         read_regs, written_regs, pointer_regs, write_width = self._classify_gadget_regs(gadget)
         roles = {}
@@ -367,9 +385,7 @@ class SemanticEngine:
             gadget, roles, lane_of, varied_reg=None, variant=1, n_trials=1)
 
         if not base_ok:
-            eff = GadgetEffect(ok=False, notes="baseline emulation faulted")
-            self._cache[gadget.raw] = eff
-            return eff
+            return self._store(gadget, GadgetEffect(ok=False, notes="baseline emulation faulted"))
 
         initial_sp = self._basis_for("sp", 0, 1)  # baseline trials use variant=1 for fixed regs
         sp_delta = base_finals.get(self.ai.sp_reg, 0) - initial_sp
@@ -485,5 +501,4 @@ class SemanticEngine:
 
         eff = GadgetEffect(reg_effects=reg_effects, mem_writes=mem_writes, mem_reads=mem_reads,
                             sp_delta=sp_delta, ok=True)
-        self._cache[gadget.raw] = eff
-        return eff
+        return self._store(gadget, eff)

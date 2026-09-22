@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ropnroll"
-version = "0.1.1"
+version = "0.2.0"
 description = "Semantic ROP/JOP gadget finder and automatic exploit-chain synthesizer"
 readme = "README.md"
 keywords = ["rop", "jop", "gadgets", "binary-analysis", "security"]

@@ -1,4 +1,5 @@
 import glob
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -6,6 +7,14 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_ropnroll_cache_dir(tmp_path_factory):
+    """Every GadgetPool() in the test suite caches to disk by default (see
+    core/cache.py); without this, running tests would read and write the
+    developer's real ~/.cache/ropnroll instead of an isolated location."""
+    os.environ["ROPNROLL_CACHE_DIR"] = str(tmp_path_factory.mktemp("ropnroll_cache"))
 
 _LIBC_CANDIDATES = [
     "/lib/x86_64-linux-gnu/libc.so.6",

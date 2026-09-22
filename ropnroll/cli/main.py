@@ -18,14 +18,18 @@ from ..verify.emulate import verify_chain
 console = Console()
 
 
-def _load_pool(paths: list[str], scan_opts: scanner.ScanOptions) -> tuple[GadgetPool, list]:
-    pool = GadgetPool()
+def _load_pool(paths: list[str], scan_opts: scanner.ScanOptions, use_cache: bool = True) -> tuple[GadgetPool, list]:
+    pool = GadgetPool(use_cache=use_cache)
     images = []
-    for p in paths:
-        img = loader.load(p)
-        gs = scanner.scan_image(img, scan_opts)
-        pool.add(img, gs)
-        images.append(img)
+    try:
+        for p in paths:
+            img = loader.load(p)
+            gs = scanner.scan_image(img, scan_opts)
+            pool.add(img, gs)
+            images.append(img)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
     return pool, images
 
 
@@ -38,7 +42,8 @@ def _scan_opts(args) -> scanner.ScanOptions:
 
 
 def cmd_scan(args):
-    pool, images = _load_pool([args.binary], _scan_opts(args))
+    with console.status("[dim]scanning...[/dim]"):
+        pool, images = _load_pool([args.binary], _scan_opts(args), use_cache=not args.no_cache)
     gadgets = pool.all()
     if args.regex:
         import re
@@ -58,9 +63,14 @@ def cmd_scan(args):
 
 
 def cmd_security(args):
-    img = loader.load(args.binary)
+    try:
+        img = loader.load(args.binary)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
     opts = _scan_opts(args)
-    gs = scanner.scan_image(img, opts)
+    with console.status("[dim]scanning...[/dim]"):
+        gs = scanner.scan_image(img, opts)
     report = security.build_report(img, gs)
     t = Table(title=f"security report: {args.binary}")
     t.add_column("property")
@@ -71,12 +81,13 @@ def cmd_security(args):
 
 
 def cmd_search(args):
-    pool, images = _load_pool(args.binary, _scan_opts(args))
-    try:
-        results = querymod.search(pool, args.query, limit=args.limit)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    with console.status("[dim]scanning and analyzing gadgets...[/dim]"):
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        try:
+            results = querymod.search(pool, args.query, limit=args.limit)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
     if not results:
         console.print("[yellow]no gadgets matched[/yellow]")
         return
@@ -85,8 +96,9 @@ def cmd_search(args):
 
 
 def cmd_pivot(args):
-    pool, images = _load_pool(args.binary, _scan_opts(args))
-    pivots = pivot.find_pivots(pool)
+    with console.status("[dim]scanning and analyzing gadgets...[/dim]"):
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pivots = pivot.find_pivots(pool)
     t = Table(title="stack pivots")
     t.add_column("address")
     t.add_column("gadget")
@@ -97,8 +109,9 @@ def cmd_pivot(args):
 
 
 def cmd_jop(args):
-    pool, images = _load_pool(args.binary, _scan_opts(args))
-    disp = jop.find_dispatchers(pool, img=images[0])
+    with console.status("[dim]scanning and analyzing gadgets...[/dim]"):
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        disp = jop.find_dispatchers(pool, img=images[0])
     t = Table(title="JOP dispatcher gadgets (self-advancing jmp/call-through-register)")
     t.add_column("address")
     t.add_column("gadget")
@@ -160,14 +173,15 @@ def cmd_libcid(args):
 
 
 def cmd_srop(args):
-    pool, images = _load_pool(args.binary, _scan_opts(args))
-    if pool.ai.arch != "x86_64":
-        console.print("[red]SROP support here is scoped to Linux x86-64[/red]")
-        sys.exit(1)
-    args_list = [int(a, 0) for a in args.args.split(",")] if args.args else [0, 0, 0]
-    while len(args_list) < 3:
-        args_list.append(0)
-    res = srop.build_srop_execve(pool, path_ptr=args_list[0], argv_ptr=args_list[1], envp_ptr=args_list[2])
+    with console.status("[dim]scanning, analyzing, and solving...[/dim]"):
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        if pool.ai.arch != "x86_64":
+            console.print("[red]SROP support here is scoped to Linux x86-64[/red]")
+            sys.exit(1)
+        args_list = [int(a, 0) for a in args.args.split(",")] if args.args else [0, 0, 0]
+        while len(args_list) < 3:
+            args_list.append(0)
+        res = srop.build_srop_execve(pool, path_ptr=args_list[0], argv_ptr=args_list[1], envp_ptr=args_list[2])
     for l in res.solve.log:
         console.print(f"[dim]{l}[/dim]")
     if not res.ok:
@@ -226,18 +240,19 @@ def _do_verify(images, chain, final_target, goal_regs):
 
 
 def cmd_call(args):
-    pool, images = _load_pool(args.binary, _scan_opts(args))
-    target = int(args.target, 0) if args.target.startswith("0x") or args.target.isdigit() else None
-    if target is None:
-        for img in images:
-            if args.target in img.symbols:
-                target = img.symbols[args.target]
-                break
+    with console.status("[dim]scanning, analyzing, and solving...[/dim]"):
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        target = int(args.target, 0) if args.target.startswith("0x") or args.target.isdigit() else None
         if target is None:
-            console.print(f"[red]symbol {args.target!r} not found[/red]")
-            sys.exit(1)
-    args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
-    res = callchain.build_call(pool, target, args_list)
+            for img in images:
+                if args.target in img.symbols:
+                    target = img.symbols[args.target]
+                    break
+            if target is None:
+                console.print(f"[red]symbol {args.target!r} not found[/red]")
+                sys.exit(1)
+        args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
+        res = callchain.build_call(pool, target, args_list)
     for l in res.solve.log:
         console.print(f"[dim]{l}[/dim]")
     if not res.ok:
@@ -252,9 +267,10 @@ def cmd_call(args):
 
 
 def cmd_syscall(args):
-    pool, images = _load_pool(args.binary, _scan_opts(args))
-    args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
-    res = syscallchain.build_syscall(pool, args.nr, args_list)
+    with console.status("[dim]scanning, analyzing, and solving...[/dim]"):
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
+        res = syscallchain.build_syscall(pool, args.nr, args_list)
     for l in res.solve.log:
         console.print(f"[dim]{l}[/dim]")
     if not res.ok:
@@ -275,6 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--no-jop", action="store_true")
     common.add_argument("--no-sys", action="store_true")
     common.add_argument("--bad-bytes", help="hex string, e.g. 000a0d")
+    common.add_argument("--no-cache", action="store_true",
+                         help="disable the persistent on-disk semantic-effect cache")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 

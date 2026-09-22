@@ -8,6 +8,24 @@ syscall chains, and can check generated chains with Unicorn emulation.
 Use it to inspect binary mitigations, find gadgets with specific register effects,
 and assemble chains for exploit-development research and CTF challenges.
 
+## Why ropnroll
+
+Most gadget tools infer a gadget's effect from a hand-written instruction model.
+ropnroll instead *measures* it: every gadget runs for real on an emulated CPU
+(Unicorn) with several input vectors, and a closed-form relation (constant,
+copy, affine, bitwise) is fit to the outputs. If a relation fits every trial,
+it's exact, not a guess -- and it's correct by construction for every
+architecture Unicorn supports, including quirks a hand-rolled model would miss.
+
+Chain synthesis uses a best-first (A*) search over candidate gadgets rather
+than a fixed-width traversal, so it isn't limited to only the first few
+shortest candidates at each step -- within its depth and work bounds, it finds
+a minimum-gadget chain instead of giving up on one that a narrower search would
+miss. Repeated analysis of the same binary (the normal workflow while building
+an exploit) is backed by a persistent on-disk cache, so the second and later
+`search`/`call`/`syscall` invocation against the same target is fast; see
+`--no-cache` and `ROPNROLL_CACHE_DIR` below if you need to bypass or relocate it.
+
 ## Installation
 
 Requires **Python 3.10 or newer**. Install from PyPI in a virtual environment:
@@ -104,6 +122,15 @@ These are illustrative offsets; replace them with values from your libc.
 This command requires internet access and sends the supplied symbol offsets to
 libc.rip. Add `--download ./libc.so.6` to download the first matching build.
 
+### Caching
+
+Semantic effects (the expensive part -- several Unicorn runs per gadget) are
+cached on disk per binary, keyed by its content hash, so repeated commands
+against the same target reuse prior analysis instead of redoing it. Pass
+`--no-cache` to any command to bypass the cache for that run. The cache lives
+under `~/.cache/ropnroll` on Linux/macOS or `%LOCALAPPDATA%\ropnroll` on
+Windows by default; set `ROPNROLL_CACHE_DIR` to relocate it.
+
 ## Supported targets and limitations
 
 | Target | Scope |
@@ -118,7 +145,9 @@ libc.rip. Add `--download ./libc.so.6` to download the first matching build.
 - `onegadget` is limited to x86/x86-64 and uses syscall stubs, not a full OS.
 - Semantic effects are inferred from a finite set of emulation trials, not
   formally proved for every possible input.
-- Chain search has depth and work limits and may fail even when a chain exists.
+- Chain search (a best-first/A* search over candidate gadgets) has depth and
+  work limits; within those bounds it finds a minimum-gadget chain if one
+  exists, but a gadget-poor pool can still exhaust the budget without one.
 - Chain verification uses the first supplied image; it does not fully validate
   chains spanning multiple images or guarantee success in a live process.
 

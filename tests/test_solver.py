@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import keystone
 
 from ropnroll.core import loader, scanner
@@ -139,3 +143,89 @@ def test_multihop_indirection_forced(tmp_path):
 
     rep = verify_chain(img, res.chain, goal_regs={"rdi": 0x1337})
     assert rep.final_regs.get("rdi") == 0x1337
+
+
+def _write_beyond_old_breadth_binary(path):
+    """Synthetic gadget set where the *only* useful transform for rdi is
+    ranked 16th among gadgets that textually touch rdi -- 13 `cmp rdi, X`
+    decoys, 2 `cmp X, rdi` decoys, then the real `mov rdi, r12 ; ret`, then
+    a direct `pop r12 ; ret`. Verified empirically (see git history/PR
+    discussion) that the x86 byte-level scanner's "unintended gadget" pass
+    only turns up *longer* (3+ instruction) noise from this byte sequence,
+    which sorts after the real gadget by instruction count -- so the real
+    gadget's rank stays comfortably beyond the old `_INDIRECT_BREADTH=8`
+    cutoff and comfortably within the new `_MAX_EXPAND=24` one.
+    """
+    ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
+
+    def asm(s):
+        enc, _ = ks.asm(s)
+        return bytes(enc)
+
+    decoy_regs = ["rax", "rbx", "rcx", "rdx", "rsi", "rbp", "r8", "r9", "r10", "r11", "r13", "r14", "r15"]
+    code = b"".join(asm(f"cmp rdi, {r} ; ret") for r in decoy_regs)
+    code += asm("cmp rax, rdi ; ret") + asm("cmp rbx, rdi ; ret")
+    code += asm("mov rdi, r12 ; ret")
+    code += asm("pop r12 ; ret")
+    write_minimal_elf(path, "x86_64", code, base=0x400000)
+
+
+def test_indirect_solver_finds_chain_beyond_old_fixed_breadth_cutoff(tmp_path):
+    """Regression for the A*-style rewrite of _solve_register_indirect: the
+    old implementation truncated every node's candidates to the first 8
+    (by instruction count), so a real, working transform ranked outside
+    that window was silently never tried. This binary is deliberately built
+    so that's exactly what would happen to the old code, and confirms the
+    new best-first search still finds and verifies the chain.
+    """
+    path = str(tmp_path / "beyond_breadth.elf")
+    _write_beyond_old_breadth_binary(path)
+
+    pool, img = _pool(path)
+    touching = pool.shortlist_touching("rdi", max_insns=6)
+    real_idx = next(i for i, g in enumerate(touching) if g.text == "mov rdi, r12 ; ret")
+    assert real_idx >= 8, "test binary no longer exercises the old breadth cutoff"
+
+    res = set_registers(pool, {"rdi": 0x1337})
+    assert res.ok, res.log
+    rep = verify_chain(img, res.chain, goal_regs={"rdi": 0x1337})
+    assert rep.final_regs.get("rdi") == 0x1337
+
+
+_DETERMINISM_SCRIPT = """
+import sys
+sys.path.insert(0, {repo_root!r})
+from ropnroll.core import loader, scanner
+from ropnroll.solve.chain import set_registers
+from ropnroll.solve.pool import GadgetPool
+
+img = loader.load(sys.argv[1])
+gs = scanner.scan_image(img, scanner.ScanOptions(max_insns=6))
+pool = GadgetPool(use_cache=False)
+pool.add(img, gs)
+res = set_registers(pool, {{"rdi": 0x1337}})
+assert res.ok, res.log
+print([w.value for w in res.chain.words])
+"""
+
+
+def test_indirect_solver_is_deterministic_across_hash_seeds(tmp_path):
+    """Regression for the exact bug class fixed in commit 2f47a48 (solver
+    non-determinism from PYTHONHASHSEED-sensitive set iteration): run the
+    same search in two subprocesses with different hash seeds and require
+    byte-identical results, not just "a" result.
+    """
+    path = str(tmp_path / "determinism.elf")
+    _write_beyond_old_breadth_binary(path)
+
+    import pathlib
+    repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
+    script = _DETERMINISM_SCRIPT.format(repo_root=repo_root)
+
+    outputs = []
+    for seed in ("0", "1", "42"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        result = subprocess.run([sys.executable, "-c", script, path],
+                                 capture_output=True, text=True, env=env, check=True)
+        outputs.append(result.stdout.strip())
+    assert len(set(outputs)) == 1, f"solver result varies by PYTHONHASHSEED: {outputs}"

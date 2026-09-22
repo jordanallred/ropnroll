@@ -48,6 +48,15 @@ class RegEffect:
     def mask(self) -> int:
         return (1 << (self.size * 8)) - 1
 
+    def to_dict(self) -> dict:
+        return {"kind": self.kind.name, "src": self.src, "k": self.k, "c": self.c,
+                "size": self.size, "sample": self.sample}
+
+    @staticmethod
+    def from_dict(d: dict) -> "RegEffect":
+        return RegEffect(kind=EKind[d["kind"]], src=d["src"], k=d["k"], c=d["c"],
+                          size=d["size"], sample=d["sample"])
+
     def value_given(self, src_val: int) -> Optional[int]:
         m = self.mask()
         if self.kind == EKind.CONST:
@@ -125,6 +134,16 @@ class MemEffect:
             return f"*({a}) = {v}"
         return f"read *({a})"
 
+    def to_dict(self) -> dict:
+        return {"addr": self.addr.to_dict(), "value": self.value.to_dict() if self.value else None,
+                "size": self.size, "is_write": self.is_write}
+
+    @staticmethod
+    def from_dict(d: dict) -> "MemEffect":
+        return MemEffect(addr=RegEffect.from_dict(d["addr"]),
+                          value=RegEffect.from_dict(d["value"]) if d["value"] else None,
+                          size=d["size"], is_write=d["is_write"])
+
 
 @dataclass
 class GadgetEffect:
@@ -141,3 +160,22 @@ class GadgetEffect:
     def sets_exactly(self, reg: str) -> bool:
         eff = self.reg_effects.get(reg)
         return eff is not None and eff.kind != EKind.UNKNOWN
+
+    def to_dict(self) -> dict:
+        return {
+            "reg_effects": {r: e.to_dict() for r, e in self.reg_effects.items()},
+            "mem_writes": [m.to_dict() for m in self.mem_writes],
+            "mem_reads": [m.to_dict() for m in self.mem_reads],
+            "sp_delta": self.sp_delta,
+            "ok": self.ok,
+            "notes": self.notes,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "GadgetEffect":
+        return GadgetEffect(
+            reg_effects={r: RegEffect.from_dict(e) for r, e in d["reg_effects"].items()},
+            mem_writes=[MemEffect.from_dict(m) for m in d["mem_writes"]],
+            mem_reads=[MemEffect.from_dict(m) for m in d["mem_reads"]],
+            sp_delta=d["sp_delta"], ok=d["ok"], notes=d["notes"],
+        )

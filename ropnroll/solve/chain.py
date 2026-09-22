@@ -10,6 +10,8 @@ compose by simply filling it in / concatenating.
 """
 from __future__ import annotations
 
+import heapq
+import itertools
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -131,51 +133,33 @@ def _gadget_ok(effect: GadgetEffect, ai: ArchInfo) -> bool:
 
 
 # candidates are already shortlisted shortest-first; only the cheapest few
-# per register are worth trying at each level of the backward search --
+# are worth trying as a *direct* (one-gadget) solution to a subproblem --
 # beyond this it's diminishing returns for combinatorially more work.
 _INDIRECT_BREADTH = 8
-# hard ceiling on total recursive calls for one top-level register, so a
+# per-node fanout cap when *expanding* a subproblem into transform
+# candidates. This is deliberately much larger than _INDIRECT_BREADTH: the
+# old fixed per-node cutoff of 8 here was exactly why the solver could miss
+# a chain that existed, if the one useful transform gadget happened to be
+# ranked 9th+ by instruction count at some level. Cross-branch
+# prioritization now comes from the global best-first queue below, not
+# from truncating any single node's options, so raising this only bounds
+# per-node work, not the search's actual reach.
+_MAX_EXPAND = 24
+# hard ceiling on total node expansions for one top-level register, so a
 # gadget-poor pool degrades to "gave up" instead of hanging.
 _INDIRECT_BUDGET = 4000
 
 
-def _solve_register_indirect(pool: GadgetPool, ai: ArchInfo, reg: str, target_val: int,
-                              protect: set[str], avoid: set[str], max_insns: int, max_depth: int,
-                              visited: frozenset[str], memo: dict, budget: list[int]):
-    """Backward-chaining search: "what value would gadget g's *source*
-    register need to hold for g to leave `reg` == target_val, and can we
-    reach *that* recursively?" Terminates either at a direct popper (base
-    case) or when max_depth runs out. Cycle-guarded via `visited` so e.g.
-    "mov rdi,rax"/"mov rax,rdi" can't ping-pong forever -- but a register
-    *is* allowed to feed a later step in its own chain (e.g. a popper
-    followed by `inc reg`), since that's forward progress, not a cycle.
+def _goal_test(pool: GadgetPool, ai: ArchInfo, reg: str, target_val: int,
+               protect: set[str], avoid: set[str], max_insns: int):
+    """Can (reg, target_val) be solved in exactly one more gadget? Tries a
+    direct "pop reg ; ret"-style load first, then an unconditional
+    const-setter. Returns a one-step (gadget, effect, fills) list, or None.
 
-    `memo` and `budget` are shared mutable state across one top-level
-    search: different branches frequently reconverge on the same (reg,
-    value) subproblem (e.g. two different registers both bottoming out at
-    "get 0x1337 into rax"), and without memoizing that, or capping total
-    work, the search tree can blow up combinatorially on a gadget-poor
-    pool well before max_depth would ever stop it on its own.
-
-    Returns an ordered list of (gadget, effect, fills) steps (poppers
-    first, transforms last) or None if nothing within max_depth works.
+    This doubles as the A* heuristic's zero-cost check (see
+    _solve_register_indirect) and as the actual step generator once a
+    subproblem is popped off the frontier as the best candidate.
     """
-    key = (reg, target_val, visited)
-    if key in memo:
-        return memo[key]
-    if budget[0] <= 0:
-        return None
-    budget[0] -= 1
-
-    result = _solve_register_indirect_uncached(pool, ai, reg, target_val, protect, avoid,
-                                                max_insns, max_depth, visited, memo, budget)
-    memo[key] = result
-    return result
-
-
-def _solve_register_indirect_uncached(pool, ai, reg, target_val, protect, avoid, max_insns,
-                                       max_depth, visited, memo, budget):
-    # base case 1: a direct "pop reg ; ret"-style load off the stack
     for pg in pool.shortlist_pop_style(reg, max_insns=max_insns)[:_INDIRECT_BREADTH]:
         pe = pool.effect_of(pg)
         if not _gadget_ok(pe, ai):
@@ -188,10 +172,7 @@ def _solve_register_indirect_uncached(pool, ai, reg, target_val, protect, avoid,
         fills = {pe_reg.c: (target_val, f"{reg} = 0x{target_val:x}")}
         return [(pg, pe, fills)]
 
-    touching = pool.shortlist_touching(reg, max_insns=max_insns)[:_INDIRECT_BREADTH]
-
-    # base case 2: a gadget that unconditionally sets reg = target_val
-    for g in touching:
+    for g in pool.shortlist_touching(reg, max_insns=max_insns)[:_INDIRECT_BREADTH]:
         eff = pool.effect_of(g)
         if not _gadget_ok(eff, ai):
             continue
@@ -200,31 +181,94 @@ def _solve_register_indirect_uncached(pool, ai, reg, target_val, protect, avoid,
             if _conflicts(eff, protect, {reg}) or (set(eff.reg_effects) & avoid):
                 continue
             return [(g, eff, {})]
+    return None
 
-    if max_depth <= 0:
-        return None
 
-    # recursive case: reg = f(src) for some other register we can solve for
-    for g in touching:
-        if budget[0] <= 0:
-            return None
-        eff = pool.effect_of(g)
-        if not _gadget_ok(eff, ai):
+def _solve_register_indirect(pool: GadgetPool, ai: ArchInfo, reg: str, target_val: int,
+                              protect: set[str], avoid: set[str], max_insns: int, max_depth: int,
+                              visited: frozenset[str], memo: dict, budget: list[int]):
+    """Best-first (A*) backward-chaining search: "what value would gadget
+    g's *source* register need to hold for g to leave `reg` == target_val,
+    and can we reach *that*?" Search states are subproblems `(reg,
+    target_val, visited)`; expanding one means "pick a gadget that computes
+    reg from some other register, and recurse on solving that register's
+    required value instead."
+
+    This replaces a plain depth-first walk that only ever tried the first
+    `_INDIRECT_BREADTH` candidates at each level: a real fix, not a
+    depth-first walk in different clothes -- with a global priority queue,
+    the subproblem most likely to be cheap to finish is expanded next
+    *regardless of which branch it's in*, so a chain that exists but needs
+    a candidate ranked outside the old fixed cutoff is no longer silently
+    unreachable. Concretely, this is textbook A* (Russell & Norvig ch. 3):
+
+      priority(state) = depth(state) + heuristic(state)
+      heuristic(state) = 0 if _goal_test already solves it in one more
+                          gadget, else 1
+
+    That heuristic never overestimates the gadgets still needed (an unsolved
+    state always needs at least one more), so it's admissible: subject to
+    `max_depth` and `budget`, this returns a minimum-gadget solution, not
+    just the first one a fixed traversal order happened to trip over.
+
+    `memo` doubles as A*'s closed set here: it records the cheapest depth at
+    which each `(reg, target_val, visited)` state has already been queued,
+    so a worse-or-equal rediscovery of the same subproblem (common --
+    unrelated registers frequently bottom out needing the same value in the
+    same source register) is skipped rather than re-expanded. `budget` caps
+    total node expansions, same role as before.
+
+    A monotonic tie-breaking counter (`seq`) keeps heap ordering fully
+    deterministic regardless of hash randomization or dict/set iteration
+    order -- no bare set is ever iterated for ordering here, which matters:
+    see commit 2f47a48, which fixed exactly this class of bug in the solver.
+
+    Returns an ordered list of (gadget, effect, fills) steps (poppers
+    first, transforms last) or None if nothing within max_depth/budget works.
+    """
+    seq = itertools.count()
+    frontier: list[tuple[int, int, str, int, frozenset, int, list]] = []
+
+    def push(r: str, tv: int, vis: frozenset, depth: int, chain: list):
+        key = (r, tv, vis)
+        prior = memo.get(key)
+        if prior is not None and prior <= depth:
+            return  # a cheaper-or-equal path to this state is already queued
+        memo[key] = depth
+        h = 0 if _goal_test(pool, ai, r, tv, protect, avoid, max_insns) is not None else 1
+        heapq.heappush(frontier, (depth + h, next(seq), r, tv, vis, depth, chain))
+
+    push(reg, target_val, visited, 0, [])
+
+    while frontier and budget[0] > 0:
+        _, _, r, tv, vis, depth, chain = heapq.heappop(frontier)
+        budget[0] -= 1
+
+        step = _goal_test(pool, ai, r, tv, protect, avoid, max_insns)
+        if step is not None:
+            return step + chain
+
+        if depth >= max_depth:
             continue
-        e = eff.reg_effects.get(reg)
-        if e is None or e.kind not in (EKind.COPY, EKind.ADD, EKind.SCALE, EKind.XOR, EKind.AND, EKind.OR):
-            continue
-        if e.src is None or e.src == ai.sp_reg or e.src in visited:
-            continue
-        needed = e.solve_for_target(target_val)
-        if needed is None:
-            continue
-        if _conflicts(eff, protect, {reg}) or (set(eff.reg_effects) & avoid):
-            continue
-        sub = _solve_register_indirect(pool, ai, e.src, needed, protect, avoid, max_insns,
-                                        max_depth - 1, visited | {reg}, memo, budget)
-        if sub is not None:
-            return sub + [(g, eff, {})]
+
+        for g in pool.shortlist_touching(r, max_insns=max_insns)[:_MAX_EXPAND]:
+            eff = pool.effect_of(g)
+            if not _gadget_ok(eff, ai):
+                continue
+            e = eff.reg_effects.get(r)
+            if e is None or e.kind not in (EKind.COPY, EKind.ADD, EKind.SCALE, EKind.XOR, EKind.AND, EKind.OR):
+                continue
+            if e.src is None or e.src == ai.sp_reg or e.src in vis:
+                continue
+            needed = e.solve_for_target(tv)
+            if needed is None:
+                continue
+            if _conflicts(eff, protect, {r}) or (set(eff.reg_effects) & avoid):
+                continue
+            # prepend: this gadget consumes e.src's value, so it must run
+            # *after* whatever the recursive chain produces for e.src.
+            push(e.src, needed, vis | {r}, depth + 1, [(g, eff, {})] + chain)
+
     return None
 
 

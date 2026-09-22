@@ -14,16 +14,18 @@ import re
 from dataclasses import dataclass, field
 
 from ..core.archinfo import ArchInfo, get_archinfo
+from ..core.cache import EffectDiskCache
 from ..core.gadget import Gadget, Terminator
 from ..core.loader import Image
 from ..semantics.effect import GadgetEffect
-from ..semantics.engine import SemanticEngine
+from ..semantics.engine import SEMANTIC_ENGINE_VERSION, SemanticEngine
 
 
 @dataclass
 class GadgetPool:
     ai: ArchInfo = None
     os: str = "linux"
+    use_cache: bool = True
     _engines: dict[str, SemanticEngine] = field(default_factory=dict)
     _images: dict[str, Image] = field(default_factory=dict)
     _gadgets: dict[str, list[Gadget]] = field(default_factory=dict)
@@ -37,7 +39,8 @@ class GadgetPool:
             raise ValueError(f"GadgetPool is arch={self.ai.arch}, can't add arch={ai.arch} module")
         self._images[img.path] = img
         self._gadgets[img.path] = gadgets
-        self._engines[img.path] = SemanticEngine(img, ai)
+        disk_cache = EffectDiskCache(img.sha256, SEMANTIC_ENGINE_VERSION) if self.use_cache else None
+        self._engines[img.path] = SemanticEngine(img, ai, disk_cache=disk_cache)
 
     def all(self) -> list[Gadget]:
         out = []

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.so
+.venv/
+venv/
+tests/fixtures/vuln_nopie
+tests/fixtures/vuln_pie
+tests/fixtures/vuln32

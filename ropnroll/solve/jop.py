@@ -22,7 +22,7 @@ chain that CET/CFG will kill on the first hop.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core.gadget import Gadget, Terminator
 from ..semantics.effect import EKind
@@ -61,7 +61,7 @@ def find_dispatchers(pool: GadgetPool, img=None, max_insns: int = 4) -> list[Dis
         re_ = eff.reg_effects.get(reg)
         if re_ is None or re_.kind != EKind.ADD or re_.src != reg or re_.c == 0:
             continue
-        if img is not None and not _cfg_ok(img, g.address):
+        if img is not None and (not _cfg_ok(img, g.address) or not _cet_ok(img, g)):
             continue
         out.append(Dispatcher(gadget=g, reg=reg, advance=re_.c & re_.mask()))
     out.sort(key=lambda d: d.gadget.n_insns)
@@ -75,17 +75,46 @@ class Trampoline:
     table_bytes: bytes
     initial_reg_value: int
     entry_address: int      # what to jump to (the dispatcher itself) to kick things off
+    warnings: list[str] = field(default_factory=list)
+
+
+def _validate_functional_targets(pool: GadgetPool, img, functional_targets: list[int]) -> list[str]:
+    """CFG/CET-validate each table entry, mirroring the checks `find_dispatchers`
+    already applies to the dispatcher itself -- without this, a functional
+    target that CFG/CET would reject gets silently written into the table
+    and only fails at runtime, on whichever hop reaches it."""
+    if img is None:
+        return []
+    warnings: list[str] = []
+    by_addr: dict[int, Gadget] | None = None
+    for addr in functional_targets:
+        if not _cfg_ok(img, addr):
+            warnings.append(f"0x{addr:x} is not a CFG-valid indirect-call target")
+            continue
+        if img.mitigations.get("endbr_required", False):
+            if by_addr is None:
+                by_addr = {g.address: g for g in pool.all()}
+            g = by_addr.get(addr)
+            if g is not None and not _cet_ok(img, g):
+                warnings.append(f"0x{addr:x} ({g.text}) does not start with endbr -- CET-IBT will reject it")
+    return warnings
 
 
 def build_trampoline(pool: GadgetPool, dispatcher: Dispatcher, functional_targets: list[int],
-                      table_addr: int) -> Trampoline:
+                      table_addr: int, img=None) -> Trampoline:
     """`functional_targets` are addresses of "functional" JOP gadgets you
     want executed in order -- typically other JMP_MEM/CALL_MEM gadgets
     through the *same* dispatch register, so each one falls back into the
     dispatcher automatically. The table itself is what you write into
     memory at `table_addr` via your write primitive; `initial_reg_value`
-    is what the dispatch register must hold before the first jump."""
+    is what the dispatch register must hold before the first jump.
+
+    Pass `img` (the same Image given to `find_dispatchers`) to CFG/CET-validate
+    the table entries; any that would be rejected at runtime are reported in
+    the returned `Trampoline.warnings` instead of silently included."""
+    warnings = _validate_functional_targets(pool, img, functional_targets)
     w = pool.ai.reg_width
     table = b"".join((addr & ((1 << (w * 8)) - 1)).to_bytes(w, "little") for addr in functional_targets)
     return Trampoline(dispatcher=dispatcher, table_addr=table_addr, table_bytes=table,
-                       initial_reg_value=table_addr, entry_address=dispatcher.gadget.address)
+                       initial_reg_value=table_addr, entry_address=dispatcher.gadget.address,
+                       warnings=warnings)

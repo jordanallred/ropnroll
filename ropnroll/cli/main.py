@@ -18,12 +18,28 @@ from ..verify.emulate import verify_chain
 console = Console()
 
 
-def _load_pool(paths: list[str], scan_opts: scanner.ScanOptions, use_cache: bool = True) -> tuple[GadgetPool, list]:
+def _parse_base_overrides(values: list[str] | None) -> dict[str, int]:
+    """`--base path=0xaddr` (repeatable) -> {path: addr}, mirroring cmd_libcid's
+    existing `name=0xoffset` parsing pattern."""
+    overrides: dict[str, int] = {}
+    for item in values or []:
+        path, _, addr = item.partition("=")
+        if not addr:
+            raise ValueError(f"expected path=0xaddress, got {item!r}")
+        overrides[path] = int(addr, 0)
+    return overrides
+
+
+def _load_pool(paths: list[str], scan_opts: scanner.ScanOptions, use_cache: bool = True,
+               base: list[str] | None = None) -> tuple[GadgetPool, list]:
     pool = GadgetPool(use_cache=use_cache)
     images = []
     try:
+        overrides = _parse_base_overrides(base)
         for p in paths:
             img = loader.load(p)
+            if p in overrides:
+                img = img.rebase(overrides[p])
             gs = scanner.scan_image(img, scan_opts)
             pool.add(img, gs)
             images.append(img)
@@ -37,13 +53,13 @@ def _scan_opts(args) -> scanner.ScanOptions:
     bad = bytes.fromhex(args.bad_bytes) if getattr(args, "bad_bytes", None) else b""
     return scanner.ScanOptions(
         max_insns=args.max_insns, rop=not args.no_rop, jop=not args.no_jop,
-        sys=not args.no_sys, bad_bytes=bad,
+        sys=not args.no_sys, bad_bytes=bad, jobs=getattr(args, "jobs", None),
     )
 
 
 def cmd_scan(args):
     with console.status("[dim]scanning...[/dim]"):
-        pool, images = _load_pool([args.binary], _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool([args.binary], _scan_opts(args), use_cache=not args.no_cache, base=args.base)
     gadgets = pool.all()
     if args.regex:
         import re
@@ -65,6 +81,9 @@ def cmd_scan(args):
 def cmd_security(args):
     try:
         img = loader.load(args.binary)
+        overrides = _parse_base_overrides(args.base)
+        if args.binary in overrides:
+            img = img.rebase(overrides[args.binary])
     except (ValueError, FileNotFoundError, OSError) as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
@@ -82,7 +101,7 @@ def cmd_security(args):
 
 def cmd_search(args):
     with console.status("[dim]scanning and analyzing gadgets...[/dim]"):
-        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache, base=args.base)
         try:
             results = querymod.search(pool, args.query, limit=args.limit)
         except ValueError as e:
@@ -97,7 +116,7 @@ def cmd_search(args):
 
 def cmd_pivot(args):
     with console.status("[dim]scanning and analyzing gadgets...[/dim]"):
-        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache, base=args.base)
         pivots = pivot.find_pivots(pool)
     t = Table(title="stack pivots")
     t.add_column("address")
@@ -110,7 +129,7 @@ def cmd_pivot(args):
 
 def cmd_jop(args):
     with console.status("[dim]scanning and analyzing gadgets...[/dim]"):
-        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache, base=args.base)
         disp = jop.find_dispatchers(pool, img=images[0])
     t = Table(title="JOP dispatcher gadgets (self-advancing jmp/call-through-register)")
     t.add_column("address")
@@ -174,7 +193,7 @@ def cmd_libcid(args):
 
 def cmd_srop(args):
     with console.status("[dim]scanning, analyzing, and solving...[/dim]"):
-        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache, base=args.base)
         if pool.ai.arch != "x86_64":
             console.print("[red]SROP support here is scoped to Linux x86-64[/red]")
             sys.exit(1)
@@ -241,7 +260,7 @@ def _do_verify(images, chain, final_target, goal_regs):
 
 def cmd_call(args):
     with console.status("[dim]scanning, analyzing, and solving...[/dim]"):
-        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache, base=args.base)
         target = int(args.target, 0) if args.target.startswith("0x") or args.target.isdigit() else None
         if target is None:
             for img in images:
@@ -252,7 +271,7 @@ def cmd_call(args):
                 console.print(f"[red]symbol {args.target!r} not found[/red]")
                 sys.exit(1)
         args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
-        res = callchain.build_call(pool, target, args_list)
+        res = callchain.build_call(pool, target, args_list, bytes_before_chain=args.bytes_before_chain)
     for l in res.solve.log:
         console.print(f"[dim]{l}[/dim]")
     if not res.ok:
@@ -268,7 +287,7 @@ def cmd_call(args):
 
 def cmd_syscall(args):
     with console.status("[dim]scanning, analyzing, and solving...[/dim]"):
-        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache)
+        pool, images = _load_pool(args.binary, _scan_opts(args), use_cache=not args.no_cache, base=args.base)
         args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
         res = syscallchain.build_syscall(pool, args.nr, args_list)
     for l in res.solve.log:
@@ -293,6 +312,11 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--bad-bytes", help="hex string, e.g. 000a0d")
     common.add_argument("--no-cache", action="store_true",
                          help="disable the persistent on-disk semantic-effect cache")
+    common.add_argument("--jobs", "-j", type=int, default=None,
+                         help="parallel worker processes for scanning (default: auto-detect)")
+    common.add_argument("--base", action="append", metavar="PATH=0xADDR",
+                         help="override a binary's load base, e.g. a leaked ASLR base "
+                              "for a Windows DLL (repeatable)")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -347,6 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("binary", nargs="+")
     s.add_argument("--target", required=True, help="address (0x...) or symbol name")
     s.add_argument("--args", default="", help="comma-separated integers, e.g. 0x1000,0,0")
+    s.add_argument("--bytes-before-chain", type=int, default=None,
+                    help="bytes of payload preceding this chain in the final buffer -- "
+                         "if given, inserts an x86-64 call-alignment correction pad when needed")
     s.add_argument("--emit", choices=["pwntools", "raw", "c", "json"])
     s.add_argument("--out")
     s.add_argument("--verify", action="store_true")

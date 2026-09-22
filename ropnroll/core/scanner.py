@@ -15,6 +15,8 @@ is added lazily on top by ropnroll.semantics.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -148,6 +150,7 @@ class ScanOptions:
     allow_cond_jump_terminators: bool = False
     bad_bytes: bytes = b""
     only_executable_segments: bool = True
+    jobs: Optional[int] = None  # None = auto-detect; 1 = force serial
 
 
 def _wanted(term: Terminator, opts: ScanOptions) -> bool:
@@ -166,21 +169,19 @@ def _has_bad_bytes(raw: bytes, bad: bytes) -> bool:
     return any(b in raw for b in bad)
 
 
-def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str) -> Iterator[Gadget]:
+def _find_x86_terminator_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts: ScanOptions) -> list[int]:
+    """Pass 1 (cheap, linear, run once regardless of worker count): every
+    'naturally aligned' terminator, plus every raw 0xc3 byte occurrence --
+    the latter is what actually finds the 'unintended' gadgets that make
+    x86 ROP possible (a terminator hiding mid-instruction)."""
     md = _make_disassembler(ai)
     classify = _CLASSIFIERS[ai.cs_arch]
-    data = seg.data
     n = len(data)
-    max_bytes = opts.max_bytes or ai.max_gadget_bytes
-    max_insns = opts.max_insns or ai.max_gadget_insns
-
-    # Pass 1: linear disassembly to find every "naturally aligned" terminator.
     term_offsets: list[int] = []
     off = 0
     while off < n:
-        chunk = data[off:off + 16]
         try:
-            insn = next(md.disasm(chunk, seg.vaddr + off, count=1))
+            insn = next(md.disasm(data[off:off + 16], seg_vaddr + off, count=1))
         except StopIteration:
             off += 1
             continue
@@ -189,24 +190,54 @@ def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str
             term_offsets.append(off)
         off += insn.size
 
-    # Pass 2: also treat every raw occurrence of a terminator opcode byte as a
-    # candidate end (this is what actually finds the "unintended" gadgets that
-    # make x86 ROP possible -- a terminator hiding mid-instruction).
     if opts.rop:
         idx = data.find(b"\xc3")
         while idx != -1:
             term_offsets.append(idx)
             idx = data.find(b"\xc3", idx + 1)
-    term_offsets = sorted(set(term_offsets))
+    return sorted(set(term_offsets))
+
+
+def _scan_x86_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts: ScanOptions,
+                       term_offsets: list[int], max_bytes: int,
+                       max_insns: int) -> list[tuple[int, bytes, str]]:
+    """Core gadget extraction for a given list of candidate terminator
+    offsets -- module-level and picklable-input-only so it can run either
+    inline (serial) or as a ProcessPoolExecutor worker (parallel) unchanged.
+
+    Every byte offset touched gets decoded (and terminator/body-safety
+    classified) *at most once* here, cached in `decode`, keyed by offset --
+    decoding at a fixed byte offset is a pure function of `data`, so this is
+    the exact same instruction stream the original per-window disassembly
+    produced, just without redundantly re-disassembling the same offsets
+    across the heavily overlapping backward-walk windows. Returns plain
+    tuples (not Gadget) since capstone's CsInsn is not picklable across a
+    process boundary -- the caller reconstructs Gadget.insns once per
+    unique result.
+    """
+    md = _make_disassembler(ai)
+    classify = _CLASSIFIERS[ai.cs_arch]
+    decode: dict[int, Optional[tuple]] = {}
+
+    def decode_at(o: int):
+        if o in decode:
+            return decode[o]
+        try:
+            insn = next(md.disasm(data[o:o + 16], seg_vaddr + o, count=1))
+        except StopIteration:
+            decode[o] = None
+            return None
+        result = (insn, classify(insn), _is_bad_body_insn(insn, ai.cs_arch))
+        decode[o] = result
+        return result
 
     seen_bytes: set[bytes] = set()
+    out: list[tuple[int, bytes, str]] = []
     for end in term_offsets:
-        # figure out how long the terminator instruction itself is
-        try:
-            term_insn = next(md.disasm(data[end:end + 16], seg.vaddr + end, count=1))
-        except StopIteration:
+        r = decode_at(end)
+        if r is None:
             continue
-        t = classify(term_insn)
+        term_insn, t, _ = r
         if t is None or not _wanted(t, opts):
             continue
         true_end = end + term_insn.size
@@ -222,18 +253,17 @@ def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str
             o = start
             ok = True
             while o < true_end:
-                try:
-                    insn = next(md.disasm(data[o:o + 16], seg.vaddr + o, count=1))
-                except StopIteration:
+                r2 = decode_at(o)
+                if r2 is None:
                     ok = False
                     break
+                insn, mid_term, bad = r2
                 if o + insn.size > true_end:
                     ok = False
                     break
-                if _is_bad_body_insn(insn, ai.cs_arch):
+                if bad:
                     ok = False
                     break
-                mid_term = classify(insn)
                 # syscall/int0x80 don't divert control flow (the kernel
                 # returns to the very next instruction), so unlike a
                 # ret/jmp/call they're safe to have mid-body -- rejecting
@@ -263,9 +293,70 @@ def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str
             if raw in seen_bytes:
                 continue
             seen_bytes.add(raw)
-            text = " ; ".join(f"{i.mnemonic} {i.op_str}".strip() for i in insns)
-            yield Gadget(address=seg.vaddr + start, raw=raw, text=text, insns=insns,
-                          terminator=t, module=module)
+            out.append((seg_vaddr + start, raw, t.name))
+    return out
+
+
+_PARALLEL_MIN_BYTES = 64 * 1024
+_PARALLEL_MIN_TERMS_PER_WORKER = 200
+_PARALLEL_MAX_WORKERS = 16
+
+
+def _choose_workers(opts: ScanOptions, data_len: int, n_terms: int) -> int:
+    if opts.jobs == 1:
+        return 1
+    if data_len < _PARALLEL_MIN_BYTES:
+        return 1
+    requested = opts.jobs or (os.cpu_count() or 1)
+    workers = max(1, min(requested, _PARALLEL_MAX_WORKERS, n_terms // _PARALLEL_MIN_TERMS_PER_WORKER))
+    return workers
+
+
+def _rebuild_gadgets(results: list[tuple[int, bytes, str]], ai: ArchInfo, module: str) -> list[Gadget]:
+    """Turn (address, raw, terminator_name) tuples -- deduped by raw bytes
+    across however many workers produced them -- into real Gadget objects.
+    Each unique raw byte sequence is already confirmed to disassemble
+    cleanly (that's what found it), so this is one cheap forward decode,
+    not a search."""
+    md = _make_disassembler(ai)
+    by_raw: dict[bytes, tuple[int, str]] = {}
+    for addr, raw, term_name in results:
+        # deterministic regardless of worker count/scheduling order: always
+        # keep the lowest address for a given byte-identical gadget, same as
+        # the single-threaded scan's first-seen-in-ascending-order behavior.
+        cur = by_raw.get(raw)
+        if cur is None or addr < cur[0]:
+            by_raw[raw] = (addr, term_name)
+
+    gadgets = []
+    for raw, (addr, term_name) in by_raw.items():
+        insns = list(md.disasm(raw, addr))
+        text = " ; ".join(f"{i.mnemonic} {i.op_str}".strip() for i in insns)
+        gadgets.append(Gadget(address=addr, raw=raw, text=text, insns=insns,
+                               terminator=Terminator[term_name], module=module))
+    return gadgets
+
+
+def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str) -> list[Gadget]:
+    data = seg.data
+    max_bytes = opts.max_bytes or ai.max_gadget_bytes
+    max_insns = opts.max_insns or ai.max_gadget_insns
+
+    term_offsets = _find_x86_terminator_offsets(data, seg.vaddr, ai, opts)
+    workers = _choose_workers(opts, len(data), len(term_offsets))
+
+    if workers == 1:
+        results = _scan_x86_offsets(data, seg.vaddr, ai, opts, term_offsets, max_bytes, max_insns)
+    else:
+        chunks = [term_offsets[i::workers] for i in range(workers)]
+        results = []
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(_scan_x86_offsets, data, seg.vaddr, ai, opts, c, max_bytes, max_insns)
+                    for c in chunks if c]
+            for f in futs:
+                results.extend(f.result())
+
+    return _rebuild_gadgets(results, ai, module)
 
 
 def _scan_segment_fixed_width(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str) -> Iterator[Gadget]:

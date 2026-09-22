@@ -60,3 +60,18 @@ def test_pe_loading_32bit():
     assert img.bits == 32
     gadgets = scanner.scan_image(img, scanner.ScanOptions())
     assert len(gadgets) > 100
+
+
+def test_parallel_scan_matches_serial(libc_path):
+    """Regression: parallel scanning must find exactly the same gadgets as
+    the serial path, including *which* address wins for byte-identical
+    gadgets that occur at more than one location -- that specifically
+    broke during development (worker-count-dependent tie-breaking) before
+    being fixed to always keep the lowest address, matching serial order."""
+    img = loader.load(libc_path)
+    serial = scanner.scan_image(img, scanner.ScanOptions(max_insns=6, jobs=1))
+    parallel = scanner.scan_image(img, scanner.ScanOptions(max_insns=6, jobs=4))
+
+    serial_set = {(g.address, g.raw, g.terminator) for g in serial}
+    parallel_set = {(g.address, g.raw, g.terminator) for g in parallel}
+    assert serial_set == parallel_set

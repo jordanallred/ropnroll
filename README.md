@@ -105,10 +105,32 @@ ropnroll search ./target ./libc.so.6 --query 'rdi=rax+8'
 ```
 
 `call`, `syscall`, `srop`, `pivot`, and `jop` also accept multiple paths.
-Addresses come from the loaded images; the CLI does not automatically discover
-a running process's ASLR bases. Pointer arguments must refer to valid memory in
-the intended target. The Python API provides live-process loading through
-`ropnroll.orchestrate` on Linux.
+Addresses come from the loaded images and reflect each file's own preferred
+base -- pass `--base path=0xaddr` (repeatable) to override a specific binary's
+base with a leaked runtime address instead, e.g. for an ASLR-relocated
+Windows DLL:
+
+```bash
+ropnroll call ./target.exe ./kernel32.dll --base kernel32.dll=0x7ffb2a3c0000 \
+  --target VirtualProtect --args 0x140001000,0x1000,0x40,0x140002000
+```
+
+Loading `kernel32.dll` alongside the target is what makes `--target
+VirtualProtect` resolve at all: the CLI only resolves symbol names against a
+binary's own *exports*, not another binary's imports, so a function the
+target merely calls (rather than defines) must come from a binary that
+actually exports it -- the same pattern as `./target ./libc.so.6 --target
+system` on Linux. Pointer arguments (like `VirtualProtect`'s output
+parameter above) must refer to valid memory in the intended target; nothing
+here allocates scratch space for you. The Python API also provides
+live-process loading and rebasing through `ropnroll.orchestrate` on Linux.
+
+For x86-64, `call` accepts `--bytes-before-chain N` (bytes of payload
+preceding the chain in your final buffer) to automatically correct stack
+alignment for the call instruction, matching what a real `call` would have
+left behind -- entering a function at the wrong 16-byte parity is a common,
+easy-to-miss way a ret2libc-style chain crashes inside the callee's own SSE
+instructions.
 
 ### Identify libc
 
@@ -150,9 +172,11 @@ Windows by default; set `ROPNROLL_CACHE_DIR` to relocate it.
   exists, but a gadget-poor pool can still exhaust the budget without one.
 - Chain verification uses the first supplied image; it does not fully validate
   chains spanning multiple images or guarantee success in a live process.
-- Raw gadget-scan speed trails other established scanners on large real-world
-  binaries; see [`benchmarks/`](benchmarks/) for measured numbers against
-  ROPgadget and ropper, and honest notes on where the gap is.
+- Raw gadget-scan speed still trails ROPgadget (not ropper, closely) on large
+  real-world binaries, though a scanner rewrite closed most of a former 3-8x
+  gap; see [`benchmarks/`](benchmarks/) for measured numbers and honest notes
+  on where the remaining gap is. Scanning parallelizes across CPU cores by
+  default (`--jobs` to control worker count; `--jobs 1` to disable).
 
 ## Development
 

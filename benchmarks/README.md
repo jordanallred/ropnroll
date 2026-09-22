@@ -32,34 +32,47 @@ to this repo.
 ## Environment
 
 - Python 3.12.3
-- ropnroll (this branch, post cache/A*-solver changes)
+- ropnroll (this branch, post scanner memoization/parallelism)
 - ROPgadget v7.7
 - Ropper 1.13.13
+- 12 CPU cores available (`--jobs` defaults to auto-detect)
 
 ## Results
 
 ```
 tool                            gadgets   time (s)
-ropnroll (max-insns=6)            80842      18.51
-ROPgadget (depth=10)              87764       2.32
-ropper                            62171       5.83
+ropnroll (max-insns=6)            80842       6.96
+ROPgadget (depth=10)              87764       2.18
+ropper                            62171       5.37
 
 ropnroll semantic classification (sample of 1000, no other tool has an equivalent):
-  604/1000 gadgets got an exact, emulation-verified register effect (1.78s)
+  604/1000 gadgets got an exact, emulation-verified register effect (1.58s)
 ```
 
-## Reading these numbers honestly
+**History**: the first run of this benchmark measured ropnroll at **18.51s** on this same
+binary -- 8x slower than ROPgadget and 3.2x slower than ropper. Two fixes closed most of that
+gap, in order:
 
-**Raw scan speed: ropnroll is the slowest of the three here (~8x ROPgadget, ~3x ropper).**
-That's the headline finding, not a footnote. ropnroll's x86 scanner walks every byte offset
-backward from every terminator instruction and disassembles the whole candidate window each
-time (`ropnroll/core/scanner.py`); ROPgadget and ropper both use cheaper search strategies. On
-a 1.9MB real-world DLL that gap is nearly 20 seconds versus ~2-6 seconds, and it will only get
-worse on a full system DLL like `ntdll.dll`, which is several times larger. This is the most
-concrete, actionable target if the goal is "awesome on Windows" -- gadget scanning is the very
-first thing every command in the tool does, so this cost is paid on every single invocation,
-even before the persistent effect cache (which only helps the *semantic* layer, not this one)
-can do anything for you.
+1. **Memoizing per-offset disassembly** (`ropnroll/core/scanner.py`): the scanner's backward
+   byte-walk was re-disassembling the same byte offsets repeatedly across heavily overlapping
+   candidate windows (measured 3.89M capstone calls against ~1.4M executable bytes in the
+   target). Caching each offset's decode result within a segment is exact -- decoding at a
+   fixed byte offset is a pure function of the bytes there -- and cut this to **~11s** with a
+   verified bit-identical gadget set.
+2. **Parallelizing across worker processes**: terminator offsets are now split across
+   `ProcessPoolExecutor` workers (`--jobs`, auto-detected by default). Getting this right
+   required a real fix, not just splitting the work: deduping byte-identical gadgets found by
+   different workers must pick the same (lowest) address every time regardless of worker count
+   or scheduling order, or the *set* of reported addresses becomes non-deterministic across
+   machines with different core counts -- caught by comparing `--jobs 1` against `--jobs 8`
+   output during development, now a permanent regression test
+   (`test_parallel_scan_matches_serial` in `tests/test_scanner.py`). With that fixed: **~7s**.
+
+ropnroll is still the slowest of the three (~3.2x ROPgadget, ~1.3x ropper), but the gap to
+ropper in particular is now small enough that the remaining difference is more plausibly
+"different algorithm constants" than "doing meaningfully more redundant work."
+
+## Reading these numbers honestly
 
 **The three gadget counts aren't directly comparable** -- each tool defaults to a different
 search depth (ropnroll: 6 instructions; ROPgadget: 10 bytes; ropper: its own fixed per-arch
@@ -74,10 +87,20 @@ it's ropnroll's only differentiator, measured on its own. The other ~40% are gad
 behavior didn't reduce to one of the closed-form relations `ropnroll/semantics/effect.py`
 models (flag-dependent instructions, non-invertible scales, etc.) -- expected, not a bug.
 
+**Parallelism helps most on larger binaries with more CPU cores** -- on a small binary
+(a few KB) the scanner stays serial by design (`_PARALLEL_MIN_BYTES` in `scanner.py`) since
+process-pool startup would cost more than it saves; this benchmark's 1.9MB target and 12 cores
+are a reasonably representative "worth it" case, but the speedup will vary with both binary
+size and available cores -- notably, process creation is heavier on Windows (spawn) than the
+Linux (fork) semantics this was measured under, so the real-world win on a Windows workstation
+may differ from the number above even though the implementation is written to be spawn-safe.
+
 ## Next steps this suggests
 
-Scanner speed is the natural next focus for the Windows push: profile
-`ropnroll/core/scanner.py`'s x86 backward walk, and look at whether the per-offset
-re-disassembly can be memoized/pruned (e.g. reusing partial disassembly across overlapping
-windows) without weakening the "unintended gadget" byte-level search that's specifically what
-makes x86 ROP scanning valuable in the first place.
+The remaining ~3.2x gap to ROPgadget is likely the per-instruction cost of capstone's
+`detail=True` mode (needed for register/operand classification) rather than redundant work --
+worth profiling directly rather than assumed. A cheaper two-tier disassembly (skip full detail
+for instructions that don't need operand inspection) was considered but not attempted here: the
+most common case that needs detail (`mov` to a segment register, the safety check that rejects
+gadgets misdecoding into privileged instructions) is also one of the most common mnemonics in
+real code, which limits how much a "detail only when needed" split would actually save.

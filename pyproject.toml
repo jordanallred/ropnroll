@@ -4,8 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ropnroll"
-version = "0.1.0"
+version = "0.1.1"
 description = "Semantic ROP/JOP gadget finder and automatic exploit-chain synthesizer"
+readme = "README.md"
+keywords = ["rop", "jop", "gadgets", "binary-analysis", "security"]
 requires-python = ">=3.10"
 dependencies = [
     "capstone>=5.0",
@@ -13,6 +15,11 @@ dependencies = [
     "unicorn>=2.0",
     "rich>=13.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jordanallred/ropnroll"
+Repository = "https://github.com/jordanallred/ropnroll"
+Issues = "https://github.com/jordanallred/ropnroll/issues"
 
 [project.optional-dependencies]
 dev = [

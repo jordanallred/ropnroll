@@ -114,7 +114,19 @@ real live process, not years of field use.
 ## Install
 
 ```bash
+# pip
 pip install -e .
+
+# uv (fast, and what this repo's CI/dev workflow assumes)
+uv pip install -e .
+# or, without an explicit venv step:
+uv sync   # if you're working from a clone and want a project-local .venv
+
+# uvx: run the CLI directly without a persistent install
+uvx --from git+https://github.com/jordanallred/ropnroll ropnroll security ./target
+
+# once a release is published to PyPI (tag a v* release to trigger it):
+uvx ropnroll security ./target
 ```
 
 Needs `capstone`, `lief`, `unicorn`, `rich` — all pulled in automatically.

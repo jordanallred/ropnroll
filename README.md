@@ -150,6 +150,9 @@ Windows by default; set `ROPNROLL_CACHE_DIR` to relocate it.
   exists, but a gadget-poor pool can still exhaust the budget without one.
 - Chain verification uses the first supplied image; it does not fully validate
   chains spanning multiple images or guarantee success in a live process.
+- Raw gadget-scan speed trails other established scanners on large real-world
+  binaries; see [`benchmarks/`](benchmarks/) for measured numbers against
+  ROPgadget and ropper, and honest notes on where the gap is.
 
 ## Development
 

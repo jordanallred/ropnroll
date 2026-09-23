@@ -685,7 +685,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="bytes of payload preceding this chain in the final buffer -- "
-        "if given, inserts an x86-64 call-alignment correction pad when needed",
+        "if given, inserts an x86-64 call-alignment correction pad when "
+        "needed; omitting it warns instead of correcting",
     )
     s.add_argument(
         "--emit",

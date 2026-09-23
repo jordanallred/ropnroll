@@ -80,6 +80,15 @@ def test_call_chain_alignment_pad(ntdll_path):
     # gadget can only shift the 16-byte residue by 8, so it can fix "off
     # by one word" misalignment, not an arbitrary byte-level skew -- that
     # never occurs on a real stack.
+    #
+    # Expected residue is 8, not 0: the overwritten return-address slot
+    # itself sits at bytes_before_chain==0, and that slot is always at an
+    # address ==8 (mod 16) (it's exactly where a real `call` would have
+    # pushed its return address). Landing on the target word `k` words
+    # later puts rsp at (that slot's address) + (k+1)*8 once the target's
+    # own `ret`-driven pop happens, so it's aligned correctly (==8 mod 16,
+    # matching a real `call`) exactly when (offset + 8) % 16 == 8, i.e.
+    # offset % 16 == 8.
     for padding in (0, 8, 40, 72, 104):
         res = build_call(
             pool, target=target_addr, args=[0x1000], bytes_before_chain=padding
@@ -89,7 +98,95 @@ def test_call_chain_alignment_pad(ntdll_path):
             i for i, w in enumerate(res.chain.words) if w.value == target_addr
         )
         target_offset = padding + target_word_index * 8
-        assert target_offset % 16 == 0, (padding, target_offset)
+        assert target_offset % 16 == 8, (padding, target_offset)
+
+
+def test_call_chain_alignment_pad_regression_4_args(ntdll_path):
+    """Regression for the exact bug: with bytes_before_chain=0 and any
+    number of single-slot `pop reg ; ret` gadgets, each argument adds
+    exactly 16 bytes (a gadget word + its popped value) -- a multiple of
+    16 -- so the misalignment present at 0 args never self-corrects as
+    more arguments are added. A padding check that only ever fires for the
+    *other* residue (as the original code did) silently never pads any of
+    these chains."""
+    pool, img = _pool(ntdll_path)
+    target_addr = img.symbols["RtlComputeCrc32"]
+    for n_args in (0, 1, 2, 3, 4):
+        res = build_call(
+            pool,
+            target=target_addr,
+            args=[0x1000] * n_args,
+            bytes_before_chain=0,
+        )
+        assert res.ok
+        pad_words = [w for w in res.chain.words if "alignment pad" in w.label]
+        assert len(pad_words) == 1, (n_args, [w.label for w in res.chain.words])
+        target_word_index = next(
+            i for i, w in enumerate(res.chain.words) if w.value == target_addr
+        )
+        assert (target_word_index * 8) % 16 == 8, n_args
+
+
+def test_call_chain_alignment_pad_synthetic(tmp_path):
+    """Same regression as test_call_chain_alignment_pad_regression_4_args,
+    but against a synthetic PE instead of ntdll.dll, so it isn't skipped
+    off Windows. Uses a pool with *only* single-slot pop-style gadgets and
+    a trailing `ret` (deliberately not scanned as its own bare-ret gadget
+    -- see the comment in build_call -- to prove the pad lookup finds a
+    usable ret address by reusing an existing gadget's terminator
+    instruction instead of depending on a standalone one-instruction ret
+    gadget existing in the pool)."""
+    ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
+
+    def asm(s):
+        enc, _ = ks.asm(s)
+        return bytes(enc)
+
+    code = (
+        asm("pop rcx ; ret")
+        + asm("pop rdx ; ret")
+        + asm("pop r8 ; ret")
+        + asm("pop r9 ; ret")
+        + asm("ret")
+    )
+    path = str(tmp_path / "align.exe")
+    write_minimal_pe(path, "x86_64", code, base=0x140000000)
+    pool, img = _pool(path)
+    target_addr = 0x141000000
+
+    for n_args in (0, 1, 2, 3, 4):
+        res = build_call(
+            pool,
+            target=target_addr,
+            args=[0x100] * n_args,
+            bytes_before_chain=0,
+        )
+        assert res.ok, (n_args, res.solve.log)
+        pad_words = [w for w in res.chain.words if "alignment pad" in w.label]
+        assert len(pad_words) == 1, (n_args, [w.label for w in res.chain.words])
+        target_word_index = next(
+            i for i, w in enumerate(res.chain.words) if w.value == target_addr
+        )
+        assert (target_word_index * 8) % 16 == 8, n_args
+
+
+def test_build_call_warns_when_bytes_before_chain_omitted(tmp_path):
+    """The alignment residue at the call target is only corrected when the
+    caller says what precedes the chain; omitting --bytes-before-chain
+    must not silently ship an uncorrected chain -- it should say so."""
+    ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
+    enc, _ = ks.asm("pop rcx ; ret")
+    path = str(tmp_path / "warn.exe")
+    write_minimal_pe(path, "x86_64", bytes(enc), base=0x400000)
+    pool, img = _pool(path)
+
+    res = build_call(pool, target=0x402000, args=[0x1337])
+    assert res.ok
+    assert any("--bytes-before-chain" in w for w in res.chain.warnings)
+
+    res = build_call(pool, target=0x402000, args=[0x1337], bytes_before_chain=0)
+    assert res.ok
+    assert not any("--bytes-before-chain" in w for w in res.chain.warnings)
 
 
 def test_multihop_indirection_forced(tmp_path):
@@ -126,16 +223,23 @@ def test_build_call_warns_on_cet_shadow_stack(tmp_path):
     write_minimal_pe(path, "x86_64", bytes(enc), base=0x400000)
     pool, img = _pool(path)
 
-    res = build_call(pool, target=0x402000, args=[0x1337])
+    # bytes_before_chain=0 throughout -- these assertions are about the CET
+    # warning specifically; leaving it unset would also add the (unrelated)
+    # missing-alignment-correction warning tested separately below.
+    res = build_call(pool, target=0x402000, args=[0x1337], bytes_before_chain=0)
     assert res.ok
     assert res.chain.warnings == []  # no img given -- nothing to warn about
 
-    res = build_call(pool, target=0x402000, args=[0x1337], img=img)
+    res = build_call(
+        pool, target=0x402000, args=[0x1337], bytes_before_chain=0, img=img
+    )
     assert res.ok
     assert res.chain.warnings == []  # img given but CET not enabled
 
     img.mitigations["cet"] = True
-    res = build_call(pool, target=0x402000, args=[0x1337], img=img)
+    res = build_call(
+        pool, target=0x402000, args=[0x1337], bytes_before_chain=0, img=img
+    )
     assert res.ok
     assert any("CET" in w for w in res.chain.warnings)
 

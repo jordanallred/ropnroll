@@ -16,6 +16,8 @@ Use it to inspect PE mitigations (DEP, ASLR, CFG, XFG, CET, SafeSEH), find
 gadgets with specific register effects, and assemble chains for Windows
 exploit-development research and CTF challenges.
 
+![ropnroll reporting mitigations, then finding gadgets by instruction pattern and by stack-pivot effect](https://raw.githubusercontent.com/jordanallred/ropnroll/main/docs/assets/demo.gif)
+
 ## Why ropnroll
 
 Most gadget tools infer a gadget's effect from a hand-written instruction model.

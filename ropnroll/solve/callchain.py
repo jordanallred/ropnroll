@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from ..core.archinfo import ArchInfo
 from ..core.gadget import Terminator
 from ..core.loader import Image
-from .chain import Chain, ChainWord, SolveResult, _tag, set_registers
+from .chain import Chain, ChainWord, SolveResult, _mk, _tag, set_registers
 from .pool import GadgetPool
 
 # Microsoft x64 ABI: RCX, RDX, R8, R9 (not SysV's RDI/RSI/RDX/RCX/R8/R9),
@@ -177,9 +177,7 @@ def build_call(
         chain = Chain(ai=ai)
         t_module, t_offset = _tag(pool, target_module, target)
         chain.words.append(
-            ChainWord(
-                target, f"call target 0x{target:x}", module=t_module, offset=t_offset
-            )
+            _mk(target, f"call target 0x{target:x}", module=t_module, offset=t_offset)
         )
         if return_to is not None:
             chain.append_raw(return_to, f"return address after call 0x{return_to:x}")

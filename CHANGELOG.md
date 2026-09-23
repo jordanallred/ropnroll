@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-09-23
+
+### Added
+
+- `PLACEHOLDER` (`0xfeedfacecafebabe`, `ropnroll.solve.chain.PLACEHOLDER`): a
+  reserved sentinel to pass as an `--args`/target value ropnroll has no way
+  to compute itself -- most commonly a pointer relative to the payload's
+  own stack position. Every `--emit` format now recognizes it instead of
+  treating it as a real literal: `json` sets `"placeholder": true` and
+  nulls `value`, `pwntools` annotates the line with `PLACEHOLDER --
+  resolve outside ropnroll`, and `raw`/`c` refuse to export until it's
+  been patched out, the same way they already refuse for an unresolved
+  `module`/`offset` word.
+
 ## [0.3.3] - 2026-09-23
 
 ### Fixed

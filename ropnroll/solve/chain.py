@@ -22,6 +22,21 @@ from .pool import GadgetPool
 
 DEFAULT_JUNK = 0x4141414141414141
 
+# A reserved sentinel a caller passes as an argument/target value (e.g. via
+# `--args`) to mean "I'll resolve this myself outside ropnroll" -- the
+# canonical case being a pointer relative to the payload's own stack
+# position, which ropnroll has no way to compute since it only ever
+# reasons about the static binaries it scanned, never a live process's
+# stack. Any ChainWord whose value equals this is tagged `placeholder`
+# (see `_mk`) and treated the same as an unresolved (module, offset) word
+# everywhere it matters: to_raw/to_c_array refuse to bake it into real
+# bytes, and to_json/to_pwntools flag it instead of presenting it as a
+# normal resolved literal. Deliberately not a plausible real address or an
+# existing convention (DEFAULT_JUNK's 0x4141... pattern already means
+# "don't care" here) so it can't collide with a value someone actually
+# intended to pass.
+PLACEHOLDER = 0xFEEDFACECAFEBABE
+
 
 @dataclass
 class ChainWord:
@@ -41,6 +56,20 @@ class ChainWord:
     # workflow this exists for.
     module: str | None = None
     offset: int | None = None
+    # True when `value == PLACEHOLDER`: a value the caller supplied
+    # explicitly meaning "not a real literal, I'll patch this in myself."
+    # Set automatically by `_mk` wherever a ChainWord is constructed from a
+    # caller-supplied value, so this never has to be threaded through by
+    # hand at every call site.
+    placeholder: bool = False
+
+
+def _mk(
+    value: int | None, label: str, module: str | None = None, offset: int | None = None
+) -> ChainWord:
+    return ChainWord(
+        value, label, module=module, offset=offset, placeholder=value == PLACEHOLDER
+    )
 
 
 def _tag(
@@ -70,7 +99,7 @@ class Chain:
         w = self.ai.reg_width
         module, offset = _tag(pool, gadget.module, gadget.address)
         self.words.append(
-            ChainWord(
+            _mk(
                 gadget.address,
                 f"0x{gadget.address:x}: {gadget.text}",
                 module=module,
@@ -82,7 +111,7 @@ class Chain:
             off = i * w
             if off in fills:
                 val, label = fills[off]
-                self.words.append(ChainWord(val, label))
+                self.words.append(_mk(val, label))
             else:
                 self.words.append(ChainWord(None, "junk (unused stack slot)"))
         self.words.append(ChainWord(None, "-> next"))
@@ -94,7 +123,7 @@ class Chain:
         module: str | None = None,
         offset: int | None = None,
     ):
-        word = ChainWord(value, label, module=module, offset=offset)
+        word = _mk(value, label, module=module, offset=offset)
         if not self.words:
             self.words.append(word)
         else:
@@ -117,7 +146,7 @@ class Chain:
         self.warnings.extend(other.warnings)
 
     def append_raw(self, value: int, label: str):
-        self.words.append(ChainWord(value, label))
+        self.words.append(_mk(value, label))
 
     def to_bytes(self, little_endian: bool = True, junk: int = DEFAULT_JUNK) -> bytes:
         w = self.ai.reg_width

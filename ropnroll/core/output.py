@@ -2,12 +2,16 @@
 
 A chain built against a module whose real runtime base isn't known yet
 (no leak, no --base) carries symbolic (module, offset) words instead of
-baked addresses -- see ChainWord in solve/chain.py. Every emit format
-below has to make a deliberate choice about what to do with those:
-pwntools/json stay symbolic (that's the whole point -- the exported
-script/data resolves them once *it* has a leak), while raw/c_array need
-real bytes on disk and refuse rather than silently write a dev-time
-placeholder address into what looks like a finished payload.
+baked addresses -- see ChainWord in solve/chain.py. A chain can also carry
+words the caller explicitly marked PLACEHOLDER (see solve/chain.py) --
+values it intends to resolve itself outside ropnroll entirely, e.g. a
+pointer relative to the payload's own stack position. Every emit format
+below has to make a deliberate choice about what to do with both: pwntools
+/json stay symbolic (that's the whole point -- the exported script/data
+resolves them once *it* has a leak or has patched the placeholder in),
+while raw/c_array need real bytes on disk and refuse rather than silently
+write a dev-time placeholder address, or the PLACEHOLDER sentinel itself,
+into what looks like a finished payload.
 """
 
 from __future__ import annotations
@@ -40,7 +44,16 @@ def unresolved_modules(chain: Chain) -> list[str]:
     return seen
 
 
+def has_placeholders(chain: Chain) -> bool:
+    """Whether any word was explicitly marked PLACEHOLDER by the caller --
+    a value it intends to resolve itself, that ropnroll never had any way
+    to fill in (see PLACEHOLDER in solve/chain.py)."""
+    return any(w.placeholder for w in chain.words)
+
+
 def _word_expr(w: ChainWord) -> str:
+    if w.placeholder:
+        return "0x%x" % w.value  # the PLACEHOLDER constant itself -- see comment
     if w.module is not None and w.offset is not None:
         var = _base_var(w.module)
         sign = "+" if w.offset >= 0 else "-"
@@ -62,6 +75,8 @@ def to_pwntools(chain: Chain, var_name: str = "payload", pack_call: str = "p64")
     lines.append(f"{var_name} = flat(")
     for w in chain.words:
         comment = w.label.replace("\n", " ")
+        if w.placeholder:
+            comment = f"PLACEHOLDER -- resolve outside ropnroll: {comment}"
         lines.append(f"    {_word_expr(w)},  # {comment}")
     lines.append(")")
     return "\n".join(lines)
@@ -77,6 +92,12 @@ def to_raw(chain: Chain, little_endian: bool = True) -> bytes:
             "runtime one. Pass --base <module>=0xADDR for each once you have a leak, "
             "or use --emit pwntools/json to keep the chain symbolic."
         )
+    if has_placeholders(chain):
+        raise ValueError(
+            "chain has a PLACEHOLDER word (see solve/chain.py) -- raw bytes would bake "
+            "in that sentinel instead of the real value you intend to resolve yourself. "
+            "Patch it in after export, or use --emit pwntools/json to keep it symbolic."
+        )
     return chain.to_bytes(little_endian=little_endian)
 
 
@@ -89,19 +110,23 @@ def to_c_array(
 
 
 def to_json(chain: Chain) -> str:
-    """`value` is null whenever `module`/`offset` are set: a consumer
-    resolving those itself (base + offset) must not also see the file's
-    own linker-preferred-base address sitting in `value`, which looks
-    like a real resolved address but isn't one -- see the ChainWord
-    docstring in solve/chain.py. `value` is only ever a number for a word
-    that's actually resolved (or a plain literal, e.g. a stack fill)."""
+    """`value` is null whenever `module`/`offset` are set, or the word is a
+    caller-marked PLACEHOLDER: a consumer resolving those itself must not
+    also see a number in `value` that looks like a real resolved value but
+    isn't one -- see the ChainWord docstring in solve/chain.py. `value` is
+    only ever a number for a word that's actually resolved (or a plain
+    literal, e.g. a stack fill). `placeholder: true` marks a word the
+    caller explicitly asked to resolve itself (PLACEHOLDER in
+    solve/chain.py) -- distinct from `module`/`offset`, which ropnroll
+    could resolve for you given a leak."""
     return json.dumps(
         [
             {
-                "value": None if w.module is not None else w.value,
+                "value": None if (w.module is not None or w.placeholder) else w.value,
                 "label": w.label,
                 "module": w.module,
                 "offset": w.offset,
+                "placeholder": w.placeholder,
             }
             for w in chain.words
         ],
@@ -115,6 +140,8 @@ def stack_layout(chain: Chain, base_label: str = "rsp+") -> str:
     w = chain.ai.reg_width
 
     def _val_str(word: ChainWord) -> str:
+        if word.placeholder:
+            return "PLACEHOLDER"
         if word.module is not None and word.offset is not None:
             return _word_expr(word)
         if word.value is not None:

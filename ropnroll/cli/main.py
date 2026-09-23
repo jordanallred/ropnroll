@@ -677,7 +677,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--args",
         default="",
         metavar="N,N,...",
-        help="comma-separated integer arguments, e.g. 0x1000,0,0",
+        help="comma-separated integer arguments, e.g. 0x1000,0,0 -- pass "
+        "0xfeedfacecafebabe for an argument you'll resolve yourself outside "
+        "ropnroll (e.g. a stack-relative pointer); it's flagged instead of "
+        "baked in by every --emit format",
     )
     s.add_argument(
         "--bytes-before-chain",

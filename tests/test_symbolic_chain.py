@@ -11,7 +11,7 @@ from ropnroll.core import loader, output, scanner
 from ropnroll.core.archinfo import get_archinfo
 from ropnroll.core.gadget import Gadget, Terminator
 from ropnroll.solve import callchain
-from ropnroll.solve.chain import Chain, ChainWord
+from ropnroll.solve.chain import PLACEHOLDER, Chain, ChainWord
 from ropnroll.solve.pool import GadgetPool
 from tests.helpers import write_minimal_pe
 
@@ -246,6 +246,80 @@ def test_to_raw_refuses_unresolved_chain():
 def test_to_c_array_refuses_unresolved_chain():
     with pytest.raises(ValueError, match="kernel32.dll"):
         output.to_c_array(_mixed_chain())
+
+
+# ---- PLACEHOLDER: a caller-marked "I'll resolve this myself" value ----
+
+
+def test_append_raw_flags_placeholder_value():
+    ai = get_archinfo("x86_64")
+    chain = Chain(ai=ai)
+    chain.append_raw(PLACEHOLDER, "stack arg[0]")
+    word = chain.words[-1]
+    assert word.value == PLACEHOLDER
+    assert word.placeholder is True
+
+
+def test_set_last_flags_placeholder_value():
+    ai = get_archinfo("x86_64")
+    chain = Chain(ai=ai)
+    chain.words.append(ChainWord(None, "placeholder slot"))
+    chain.set_last(PLACEHOLDER, "call target")
+    assert chain.words[-1].placeholder is True
+
+
+def test_append_gadget_block_flags_placeholder_fill():
+    img = loader.load(PE_FIXTURE)
+    pool = _pool_with(img)
+    ai = get_archinfo("x86_64")
+    g = _fake_gadget(img.path, img.image_base + 0x1000)
+    from ropnroll.semantics.effect import GadgetEffect
+
+    eff = GadgetEffect(ok=True, sp_delta=16, reg_effects={}, mem_writes=[], mem_reads=[])
+    chain = Chain(ai=ai)
+    chain.append_gadget_block(g, eff, {0: (PLACEHOLDER, "rdx = PLACEHOLDER")}, pool=pool)
+    fill_word = chain.words[1]
+    assert fill_word.value == PLACEHOLDER
+    assert fill_word.placeholder is True
+
+
+def _chain_with_placeholder():
+    ai = get_archinfo("x86_64")
+    chain = Chain(ai=ai)
+    chain.append_raw(0x1400013AC, "0x1400013ac: pop rdx ; ret")
+    chain.append_raw(PLACEHOLDER, "rdx = stack-relative pointer")
+    return chain
+
+
+def test_to_json_flags_placeholder_and_nulls_its_value():
+    import json
+
+    words = json.loads(output.to_json(_chain_with_placeholder()))
+    assert words[0]["placeholder"] is False
+    assert words[1]["placeholder"] is True
+    assert words[1]["value"] is None
+    assert words[1]["module"] is None
+
+
+def test_to_pwntools_annotates_placeholder():
+    text = output.to_pwntools(_chain_with_placeholder())
+    assert "0xfeedfacecafebabe" in text
+    assert "PLACEHOLDER -- resolve outside ropnroll: rdx = stack-relative pointer" in text
+
+
+def test_to_raw_refuses_chain_with_placeholder():
+    with pytest.raises(ValueError, match="PLACEHOLDER"):
+        output.to_raw(_chain_with_placeholder())
+
+
+def test_to_c_array_refuses_chain_with_placeholder():
+    with pytest.raises(ValueError, match="PLACEHOLDER"):
+        output.to_c_array(_chain_with_placeholder())
+
+
+def test_stack_layout_shows_placeholder():
+    text = output.stack_layout(_chain_with_placeholder())
+    assert "PLACEHOLDER" in text
 
 
 def test_to_raw_works_once_fully_resolved():

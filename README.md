@@ -129,6 +129,25 @@ ropnroll pattern offset 0x6a413169              # whatever a debugger showed in 
 little-endian, matching real memory layout); pass `--text` to instead look up
 a literal pattern substring.
 
+### Arguments you'll resolve yourself
+
+Some argument values ropnroll simply has no way to compute -- most commonly a
+pointer relative to the payload's own stack position, since ropnroll only
+reasons about the static binaries it scanned, never a live process's stack.
+Pass `0xfeedfacecafebabe` for that argument instead of a real value:
+
+```bash
+ropnroll call ./target.exe --target VirtualProtect \
+  --args 0xfeedfacecafebabe,0x1000,0x40,0xfeedfacecafebabe \
+  --emit json --out chain.json
+```
+
+Every `--emit` format flags a word carrying that value instead of treating it
+as a real literal: `json` sets `"placeholder": true` and nulls `value`,
+`pwntools` annotates the line with `PLACEHOLDER -- resolve outside ropnroll`,
+and `raw`/`c` refuse to export until it's gone. Patch it into the exported
+chain yourself once you know the real value.
+
 ### Avoiding bad characters
 
 If the payload reaches the target through something byte-sensitive (a

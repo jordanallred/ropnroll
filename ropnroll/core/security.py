@@ -2,6 +2,7 @@
 matter for deciding a ROP/JOP strategy: syscall-gadget availability, and
 Control Flow Guard, since it restricts which addresses a JOP dispatcher may
 legally land on."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,7 +37,8 @@ def build_report(img: Image, gadgets: list[Gadget]) -> SecurityReport:
     nx_val, nx_style = _mitigation(m.get("nx"))
     canary_val, canary_style = _mitigation(m.get("canary"), no="no (or stripped)")
     lines = [
-        ("format", img.format, ""), ("arch", f"{img.arch} ({img.bits}-bit)", ""),
+        ("format", img.format, ""),
+        ("arch", f"{img.arch} ({img.bits}-bit)", ""),
         ("PIE / ASLR-relocatable", pie_val, pie_style),
         ("NX / DEP", nx_val, nx_style),
         ("stack canary", canary_val, canary_style),
@@ -45,17 +47,31 @@ def build_report(img: Image, gadgets: list[Gadget]) -> SecurityReport:
     # classic ROP outright, so report it first and unambiguously, in red
     # rather than the usual yellow.
     if m.get("cet"):
-        lines.append(("CET shadow stack (/CETCOMPAT)",
-                       "ENABLED -- return-address ROP defeated by hardware shadow stack",
-                       "bold red"))
+        lines.append(
+            (
+                "CET shadow stack (/CETCOMPAT)",
+                "ENABLED -- return-address ROP defeated by hardware shadow stack",
+                "bold red",
+            )
+        )
     else:
         lines.append(("CET shadow stack (/CETCOMPAT)", "not enabled", "green"))
     if m.get("xfg"):
-        lines.append(("Control Flow Guard",
-                       "XFG (eXtended Flow Guard) -- indirect-call targets type-checked", "red"))
+        lines.append(
+            (
+                "Control Flow Guard",
+                "XFG (eXtended Flow Guard) -- indirect-call targets type-checked",
+                "red",
+            )
+        )
     elif m.get("cfg"):
-        lines.append(("Control Flow Guard",
-                       "ENABLED -- JOP dispatch restricted to guard_cf table", "yellow"))
+        lines.append(
+            (
+                "Control Flow Guard",
+                "ENABLED -- JOP dispatch restricted to guard_cf table",
+                "yellow",
+            )
+        )
     else:
         lines.append(("Control Flow Guard", "not enabled", "green"))
     if img.bits == 32:
@@ -64,16 +80,38 @@ def build_report(img: Image, gadgets: list[Gadget]) -> SecurityReport:
     entropy_val, entropy_style = _mitigation(m.get("high_entropy_va"))
     lines.append(("ASLR high-entropy (/HIGH_ENTROPY_VA)", entropy_val, entropy_style))
 
-    n_sys = sum(1 for g in gadgets if g.terminator in (Terminator.SYSCALL, Terminator.INT80))
-    n_jop = sum(1 for g in gadgets if g.terminator in
-                (Terminator.JMP_REG, Terminator.CALL_REG, Terminator.JMP_MEM, Terminator.CALL_MEM))
+    n_sys = sum(
+        1 for g in gadgets if g.terminator in (Terminator.SYSCALL, Terminator.INT80)
+    )
+    n_jop = sum(
+        1
+        for g in gadgets
+        if g.terminator
+        in (
+            Terminator.JMP_REG,
+            Terminator.CALL_REG,
+            Terminator.JMP_MEM,
+            Terminator.CALL_MEM,
+        )
+    )
     # gadget counts are an opportunity, not a threat -- style them green when
     # nonzero (usable) and dim when empty (this avenue is a dead end here).
     lines.append(("gadgets found", str(len(gadgets)), "green" if gadgets else "dim"))
     lines.append(("  syscall/int0x80 gadgets", str(n_sys), "green" if n_sys else "dim"))
     lines.append(("  JOP-terminated gadgets", str(n_jop), "green" if n_jop else "dim"))
     if img.cfg_valid_targets:
-        lines.append(("  CFG-valid indirect-call targets", str(len(img.cfg_valid_targets)), "green"))
+        lines.append(
+            (
+                "  CFG-valid indirect-call targets",
+                str(len(img.cfg_valid_targets)),
+                "green",
+            )
+        )
 
-    return SecurityReport(image=img, lines=lines, n_syscall_gadgets=n_sys, n_jop_gadgets=n_jop,
-                           n_cfg_targets=len(img.cfg_valid_targets))
+    return SecurityReport(
+        image=img,
+        lines=lines,
+        n_syscall_gadgets=n_sys,
+        n_jop_gadgets=n_jop,
+        n_cfg_targets=len(img.cfg_valid_targets),
+    )

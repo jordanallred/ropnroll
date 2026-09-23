@@ -1,5 +1,10 @@
 # ropnroll
 
+[![PyPI](https://img.shields.io/pypi/v/ropnroll.svg)](https://pypi.org/project/ropnroll/)
+[![Python versions](https://img.shields.io/pypi/pyversions/ropnroll.svg)](https://pypi.org/project/ropnroll/)
+[![CI](https://github.com/jordanallred/ropnroll/actions/workflows/publish.yml/badge.svg)](https://github.com/jordanallred/ropnroll/actions/workflows/publish.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 ropnroll is a command-line tool and Python library for finding return-oriented
 programming (ROP) and jump-oriented programming (JOP) gadgets in **Windows PE
 binaries** (EXE/DLL, x86/x86-64/ARM64). It supports instruction-pattern and
@@ -85,6 +90,7 @@ Run `ropnroll <command> --help` for command options.
 | `pivot` | Find stack-pivot gadgets. |
 | `jop` | Find JOP dispatcher gadgets. |
 | `call` | Build a chain that calls a function by symbol or address. |
+| `pattern` | Generate a cyclic pattern, or look up a crash offset within one. |
 
 ### Build and export a chain
 
@@ -104,6 +110,42 @@ You can pool gadgets from multiple binaries:
 ```bash
 ropnroll search ./target.exe ./kernel32.dll --query 'rcx=rax+8'
 ```
+
+### Crash-offset triage
+
+Before hunting for gadgets, find out how many bytes of your overflow precede
+the data you control:
+
+```bash
+ropnroll pattern create 400 --out pattern.bin   # send this as your crash input
+ropnroll pattern offset 0x6a413169              # whatever a debugger showed in EIP/RIP
+```
+
+`offset` treats its argument as the *value* a register held (packed
+little-endian, matching real memory layout); pass `--text` to instead look up
+a literal pattern substring.
+
+### Avoiding bad characters
+
+If the payload reaches the target through something byte-sensitive (a
+`strcpy`-style copy, a URL-decoder, ...), pass `--bad-chars` (any command that
+builds or searches gadgets accepts it) to exclude gadgets whose address would
+introduce one of those bytes, and to flag any call target or literal argument
+that still contains one:
+
+```bash
+ropnroll call ./target.exe --target ExitProcess --args 0 --bad-chars 000a0d
+```
+
+This is distinct from `--bad-bytes`, which filters a gadget's own instruction
+*encoding* at its fixed location in the binary -- a narrower, scanner-level
+filter, not what a delivered payload actually contains.
+
+### CET
+
+If the target is CET shadow-stack compatible (`/CETCOMPAT`), `call` warns that
+a return-based chain will fault on its first `ret` and suggests `jop` instead,
+which CET's shadow stack does not check.
 
 `call`, `pivot`, and `jop` also accept multiple paths. Addresses come from the
 loaded images and reflect each file's own preferred base -- pass `--base
@@ -184,5 +226,13 @@ For bug reports, include the command, full error output, Python and ropnroll
 versions, and the target's architecture and file format. Include a minimal
 reproducer when possible.
 
-Pull requests are welcome. Include relevant tests for behavior changes and run
-the test suite before submitting.
+Pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup and PR expectations. To report a security vulnerability in
+ropnroll itself, see [SECURITY.md](SECURITY.md) instead of opening a public
+issue.
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## License
+
+[GPL-3.0-or-later](LICENSE).

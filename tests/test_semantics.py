@@ -17,7 +17,9 @@ def _find(gadgets, pattern):
 def test_pop_reg_is_load_from_stack(ntdll_path):
     img = loader.load(ntdll_path)
     ai = get_archinfo(img.arch, img.little_endian)
-    gadgets = scanner.scan_image(img, scanner.ScanOptions(jop=False, sys=False, max_insns=2))
+    gadgets = scanner.scan_image(
+        img, scanner.ScanOptions(jop=False, sys=False, max_insns=2)
+    )
     g = _find(gadgets, r"^pop rdi ; ret$")
     eff = SemanticEngine(img, ai).compute(g)
     assert eff.ok
@@ -30,7 +32,9 @@ def test_pop_reg_is_load_from_stack(ntdll_path):
 def test_xor_self_is_const_zero(ntdll_path):
     img = loader.load(ntdll_path)
     ai = get_archinfo(img.arch, img.little_endian)
-    gadgets = scanner.scan_image(img, scanner.ScanOptions(jop=False, sys=False, max_insns=2))
+    gadgets = scanner.scan_image(
+        img, scanner.ScanOptions(jop=False, sys=False, max_insns=2)
+    )
     g = _find(gadgets, r"^xor eax, eax ; ret$")
     eff = SemanticEngine(img, ai).compute(g)
     assert eff.ok
@@ -44,7 +48,9 @@ def test_32bit_write_zero_extends_on_x86_64(ntdll_path):
     implicit zero-extend), not misfit as some unrelated constant."""
     img = loader.load(ntdll_path)
     ai = get_archinfo(img.arch, img.little_endian)
-    gadgets = scanner.scan_image(img, scanner.ScanOptions(jop=False, sys=False, max_insns=2))
+    gadgets = scanner.scan_image(
+        img, scanner.ScanOptions(jop=False, sys=False, max_insns=2)
+    )
     g = _find(gadgets, r"^inc edi ; ret$")
     eff = SemanticEngine(img, ai).compute(g)
     assert eff.ok
@@ -58,7 +64,9 @@ def test_32bit_write_zero_extends_on_x86_64(ntdll_path):
 def test_mov_reg_reg_is_copy(ntdll_path):
     img = loader.load(ntdll_path)
     ai = get_archinfo(img.arch, img.little_endian)
-    gadgets = scanner.scan_image(img, scanner.ScanOptions(jop=False, sys=False, max_insns=2))
+    gadgets = scanner.scan_image(
+        img, scanner.ScanOptions(jop=False, sys=False, max_insns=2)
+    )
     g = _find(gadgets, r"^mov rax, rcx ; ret$")
     eff = SemanticEngine(img, ai).compute(g)
     assert eff.ok

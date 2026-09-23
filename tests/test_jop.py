@@ -45,7 +45,9 @@ def test_find_dispatchers_excludes_cfg_invalid(tmp_path):
     dispatcher_addr = jop.find_dispatchers(pool)[0].gadget.address
 
     img.mitigations["cfg"] = True
-    img.cfg_valid_targets = {dispatcher_addr + 0x1000}  # deliberately excludes the real dispatcher
+    img.cfg_valid_targets = {
+        dispatcher_addr + 0x1000
+    }  # deliberately excludes the real dispatcher
     assert jop.find_dispatchers(pool, img=img) == []
 
     img.cfg_valid_targets = {dispatcher_addr}
@@ -71,11 +73,18 @@ def test_build_trampoline_reports_cfg_invalid_functional_targets(tmp_path):
     dispatcher = jop.find_dispatchers(pool)[0]
 
     img.mitigations["cfg"] = True
-    img.cfg_valid_targets = {dispatcher.gadget.address}  # only the dispatcher itself is valid
+    img.cfg_valid_targets = {
+        dispatcher.gadget.address
+    }  # only the dispatcher itself is valid
     bad_addr = dispatcher.gadget.address + 0x2000
 
-    tramp = jop.build_trampoline(pool, dispatcher, [dispatcher.gadget.address, bad_addr],
-                                  table_addr=0x500000, img=img)
+    tramp = jop.build_trampoline(
+        pool,
+        dispatcher,
+        [dispatcher.gadget.address, bad_addr],
+        table_addr=0x500000,
+        img=img,
+    )
     assert any(f"0x{bad_addr:x}" in w for w in tramp.warnings)
     assert not any(f"0x{dispatcher.gadget.address:x}" in w for w in tramp.warnings)
 
@@ -85,5 +94,7 @@ def test_build_trampoline_no_img_no_warnings(tmp_path):
     should behave exactly as before (no warnings field surprises)."""
     pool, img = _dispatcher_pool(tmp_path)
     dispatcher = jop.find_dispatchers(pool)[0]
-    tramp = jop.build_trampoline(pool, dispatcher, [dispatcher.gadget.address], table_addr=0x500000)
+    tramp = jop.build_trampoline(
+        pool, dispatcher, [dispatcher.gadget.address], table_addr=0x500000
+    )
     assert tramp.warnings == []

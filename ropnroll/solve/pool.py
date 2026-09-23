@@ -9,12 +9,14 @@ the same "structural search narrows it, semantics confirms it" split
 Ropper/Ropinator use, just with a concrete-emulation confirmer instead of
 a modeled one.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
 from ..core.archinfo import ArchInfo, get_archinfo
+from ..core.badchars import has_bad_bytes
 from ..core.cache import EffectDiskCache
 from ..core.gadget import Gadget, Terminator
 from ..core.loader import Image
@@ -27,6 +29,11 @@ class GadgetPool:
     ai: ArchInfo = None
     os: str = "windows"
     use_cache: bool = True
+    # byte values no gadget *address* may contain -- e.g. the exploit's
+    # delivery path is a strcpy and can't carry a NUL. Checked once here so
+    # every solver (chain, pivot, jop) automatically only ever sees usable
+    # candidates, instead of each having to filter separately.
+    bad_chars: frozenset[int] = field(default_factory=frozenset)
     _engines: dict[str, SemanticEngine] = field(default_factory=dict)
     _images: dict[str, Image] = field(default_factory=dict)
     _gadgets: dict[str, list[Gadget]] = field(default_factory=dict)
@@ -37,16 +44,28 @@ class GadgetPool:
             self.ai = ai
             self.os = img.os
         elif self.ai.arch != ai.arch:
-            raise ValueError(f"GadgetPool is arch={self.ai.arch}, can't add arch={ai.arch} module")
+            raise ValueError(
+                f"GadgetPool is arch={self.ai.arch}, can't add arch={ai.arch} module"
+            )
         self._images[img.path] = img
         self._gadgets[img.path] = gadgets
-        disk_cache = EffectDiskCache(img.sha256, SEMANTIC_ENGINE_VERSION) if self.use_cache else None
+        disk_cache = (
+            EffectDiskCache(img.sha256, SEMANTIC_ENGINE_VERSION)
+            if self.use_cache
+            else None
+        )
         self._engines[img.path] = SemanticEngine(img, ai, disk_cache=disk_cache)
 
     def all(self) -> list[Gadget]:
         out = []
         for gs in self._gadgets.values():
             out.extend(gs)
+        if self.bad_chars and self.ai is not None:
+            out = [
+                g
+                for g in out
+                if not has_bad_bytes(g.address, self.ai.reg_width, self.bad_chars)
+            ]
         return out
 
     def effect_of(self, g: Gadget) -> GadgetEffect:
@@ -68,26 +87,43 @@ class GadgetPool:
         """Cheap syntactic pre-filter: gadgets that plausibly load `reg`
         directly off the stack, ranked shortest-first."""
         rx = re.compile(rf"(^|; )pop {re.escape(reg)}\b")
-        out = [g for g in self.all() if g.terminator in (Terminator.RET, Terminator.RET_IMM)
-               and g.n_insns <= max_insns and rx.search(g.text)]
+        out = [
+            g
+            for g in self.all()
+            if g.terminator in (Terminator.RET, Terminator.RET_IMM)
+            and g.n_insns <= max_insns
+            and rx.search(g.text)
+        ]
         out.sort(key=lambda g: g.n_insns)
         return out
 
     def shortlist_touching(self, reg: str, max_insns: int = 4) -> list[Gadget]:
         rx = re.compile(rf"\b{re.escape(reg)}\b")
-        out = [g for g in self.all() if g.terminator in (Terminator.RET, Terminator.RET_IMM)
-               and g.n_insns <= max_insns and rx.search(g.text)]
+        out = [
+            g
+            for g in self.all()
+            if g.terminator in (Terminator.RET, Terminator.RET_IMM)
+            and g.n_insns <= max_insns
+            and rx.search(g.text)
+        ]
         out.sort(key=lambda g: g.n_insns)
         return out
 
     def shortlist_mem_write(self, max_insns: int = 4) -> list[Gadget]:
         rx = re.compile(r"mov [a-z0-9]+ ptr \[")
-        out = [g for g in self.all() if g.terminator in (Terminator.RET, Terminator.RET_IMM)
-               and g.n_insns <= max_insns and rx.search(g.text)]
+        out = [
+            g
+            for g in self.all()
+            if g.terminator in (Terminator.RET, Terminator.RET_IMM)
+            and g.n_insns <= max_insns
+            and rx.search(g.text)
+        ]
         out.sort(key=lambda g: g.n_insns)
         return out
 
-    def shortlist_terminator(self, term: Terminator, max_insns: int = 6) -> list[Gadget]:
+    def shortlist_terminator(
+        self, term: Terminator, max_insns: int = 6
+    ) -> list[Gadget]:
         out = [g for g in self.all() if g.terminator == term and g.n_insns <= max_insns]
         out.sort(key=lambda g: g.n_insns)
         return out

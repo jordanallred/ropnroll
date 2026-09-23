@@ -22,6 +22,7 @@ running each tool normally" is usually the more useful number.
 Usage:
     python3 benchmarks/compare_gadget_finders.py --binary /path/to/file.dll
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,7 +47,9 @@ def bench_ropnroll(binary: str, max_insns: int) -> tuple[int, float]:
 
     def run():
         img = loader.load(binary)
-        return scanner.scan_image(img, scanner.ScanOptions(max_insns=max_insns), use_cache=False)
+        return scanner.scan_image(
+            img, scanner.ScanOptions(max_insns=max_insns), use_cache=False
+        )
 
     gadgets, elapsed = _time_it(run)
     return len(gadgets), elapsed
@@ -63,14 +66,18 @@ def bench_ropnroll_semantic_sample(binary: str, max_insns: int, sample_size: int
 
     img = loader.load(binary)
     ai = get_archinfo(img.arch, img.little_endian)
-    gadgets = scanner.scan_image(img, scanner.ScanOptions(max_insns=max_insns))[:sample_size]
+    gadgets = scanner.scan_image(img, scanner.ScanOptions(max_insns=max_insns))[
+        :sample_size
+    ]
     engine = SemanticEngine(img, ai, disk_cache=None)
 
     def run():
         classified = 0
         for g in gadgets:
             eff = engine.compute(g)
-            if eff.ok and any(e.kind.name != "UNKNOWN" for e in eff.reg_effects.values()):
+            if eff.ok and any(
+                e.kind.name != "UNKNOWN" for e in eff.reg_effects.values()
+            ):
                 classified += 1
         return classified
 
@@ -118,14 +125,27 @@ def bench_subprocess(cmd: list[str], count_pattern: str) -> tuple[int | None, fl
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--binary", required=True, help="path to the target binary")
-    ap.add_argument("--max-insns", type=int, default=6, help="ropnroll's instruction-count depth")
-    ap.add_argument("--ropgadget-depth", type=int, default=10, help="ROPgadget's --depth (bytes)")
-    ap.add_argument("--tools", default="ropnroll,ropgadget,ropper",
-                     help="comma-separated subset to run")
-    ap.add_argument("--semantic-sample", type=int, default=0,
-                     help="also report ropnroll's semantic classification rate over the first N gadgets")
+    ap.add_argument(
+        "--max-insns", type=int, default=6, help="ropnroll's instruction-count depth"
+    )
+    ap.add_argument(
+        "--ropgadget-depth", type=int, default=10, help="ROPgadget's --depth (bytes)"
+    )
+    ap.add_argument(
+        "--tools",
+        default="ropnroll,ropgadget,ropper",
+        help="comma-separated subset to run",
+    )
+    ap.add_argument(
+        "--semantic-sample",
+        type=int,
+        default=0,
+        help="also report ropnroll's semantic classification rate over the first N gadgets",
+    )
     args = ap.parse_args()
 
     if not Path(args.binary).exists():
@@ -142,8 +162,10 @@ def main():
         ropgadget_cmd = _find_ropgadget()
         if ropgadget_cmd:
             count, elapsed = bench_subprocess(
-                ropgadget_cmd + ["--binary", args.binary, "--depth", str(args.ropgadget_depth)],
-                r"Unique gadgets found:\s*(\d+)")
+                ropgadget_cmd
+                + ["--binary", args.binary, "--depth", str(args.ropgadget_depth)],
+                r"Unique gadgets found:\s*(\d+)",
+            )
             rows.append((f"ROPgadget (depth={args.ropgadget_depth})", count, elapsed))
         else:
             print("ROPgadget not found, skipping")
@@ -151,8 +173,9 @@ def main():
     if "ropper" in tools:
         ropper_bin = _find_ropper()
         if ropper_bin:
-            count, elapsed = bench_subprocess([ropper_bin, "--file", args.binary, "--nocolor"],
-                                               r"(\d+) gadgets found")
+            count, elapsed = bench_subprocess(
+                [ropper_bin, "--file", args.binary, "--nocolor"], r"(\d+) gadgets found"
+            )
             rows.append(("ropper", count, elapsed))
         else:
             print("ropper not found, skipping")
@@ -164,11 +187,16 @@ def main():
 
     if args.semantic_sample:
         n, classified, elapsed = bench_ropnroll_semantic_sample(
-            args.binary, args.max_insns, args.semantic_sample)
+            args.binary, args.max_insns, args.semantic_sample
+        )
         print()
-        print(f"ropnroll semantic classification (sample of {n}, no other tool has an equivalent):")
-        print(f"  {classified}/{n} gadgets got an exact, emulation-verified register effect "
-              f"({elapsed:.2f}s)")
+        print(
+            f"ropnroll semantic classification (sample of {n}, no other tool has an equivalent):"
+        )
+        print(
+            f"  {classified}/{n} gadgets got an exact, emulation-verified register effect "
+            f"({elapsed:.2f}s)"
+        )
 
 
 if __name__ == "__main__":

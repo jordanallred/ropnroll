@@ -19,6 +19,7 @@ CF table under CFG) -- we filter dispatcher *and* functional-gadget
 candidates against that automatically instead of silently producing a
 chain that CET/CFG will kill on the first hop.
 """
+
 from __future__ import annotations
 
 import re
@@ -34,22 +35,31 @@ _MEM_TARGET_RE = re.compile(r"\[\s*(\w+)\s*\]\s*$")
 @dataclass
 class Dispatcher:
     gadget: Gadget
-    reg: str          # the dispatch register (both the jump base and what advances)
-    advance: int       # bytes it advances per cycle -- your table's stride
+    reg: str  # the dispatch register (both the jump base and what advances)
+    advance: int  # bytes it advances per cycle -- your table's stride
 
 
 def _cet_ok(img, g: Gadget) -> bool:
-    return not img.mitigations.get("endbr_required", False) or g.text.startswith("endbr")
+    return not img.mitigations.get("endbr_required", False) or g.text.startswith(
+        "endbr"
+    )
 
 
 def _cfg_ok(img, addr: int) -> bool:
-    return not img.mitigations.get("cfg") or not img.cfg_valid_targets or addr in img.cfg_valid_targets
+    return (
+        not img.mitigations.get("cfg")
+        or not img.cfg_valid_targets
+        or addr in img.cfg_valid_targets
+    )
 
 
-def find_dispatchers(pool: GadgetPool, img=None, max_insns: int = 4) -> list[Dispatcher]:
+def find_dispatchers(
+    pool: GadgetPool, img=None, max_insns: int = 4
+) -> list[Dispatcher]:
     out = []
-    candidates = pool.shortlist_terminator(Terminator.JMP_MEM, max_insns=max_insns) + \
-        pool.shortlist_terminator(Terminator.CALL_MEM, max_insns=max_insns)
+    candidates = pool.shortlist_terminator(
+        Terminator.JMP_MEM, max_insns=max_insns
+    ) + pool.shortlist_terminator(Terminator.CALL_MEM, max_insns=max_insns)
     for g in candidates:
         m = _MEM_TARGET_RE.search(g.text)
         if not m:
@@ -74,11 +84,13 @@ class Trampoline:
     table_addr: int
     table_bytes: bytes
     initial_reg_value: int
-    entry_address: int      # what to jump to (the dispatcher itself) to kick things off
+    entry_address: int  # what to jump to (the dispatcher itself) to kick things off
     warnings: list[str] = field(default_factory=list)
 
 
-def _validate_functional_targets(pool: GadgetPool, img, functional_targets: list[int]) -> list[str]:
+def _validate_functional_targets(
+    pool: GadgetPool, img, functional_targets: list[int]
+) -> list[str]:
     """CFG/CET-validate each table entry, mirroring the checks `find_dispatchers`
     already applies to the dispatcher itself -- without this, a functional
     target that CFG/CET would reject gets silently written into the table
@@ -96,12 +108,19 @@ def _validate_functional_targets(pool: GadgetPool, img, functional_targets: list
                 by_addr = {g.address: g for g in pool.all()}
             g = by_addr.get(addr)
             if g is not None and not _cet_ok(img, g):
-                warnings.append(f"0x{addr:x} ({g.text}) does not start with endbr -- CET-IBT will reject it")
+                warnings.append(
+                    f"0x{addr:x} ({g.text}) does not start with endbr -- CET-IBT will reject it"
+                )
     return warnings
 
 
-def build_trampoline(pool: GadgetPool, dispatcher: Dispatcher, functional_targets: list[int],
-                      table_addr: int, img=None) -> Trampoline:
+def build_trampoline(
+    pool: GadgetPool,
+    dispatcher: Dispatcher,
+    functional_targets: list[int],
+    table_addr: int,
+    img=None,
+) -> Trampoline:
     """`functional_targets` are addresses of "functional" JOP gadgets you
     want executed in order -- typically other JMP_MEM/CALL_MEM gadgets
     through the *same* dispatch register, so each one falls back into the
@@ -114,7 +133,15 @@ def build_trampoline(pool: GadgetPool, dispatcher: Dispatcher, functional_target
     the returned `Trampoline.warnings` instead of silently included."""
     warnings = _validate_functional_targets(pool, img, functional_targets)
     w = pool.ai.reg_width
-    table = b"".join((addr & ((1 << (w * 8)) - 1)).to_bytes(w, "little") for addr in functional_targets)
-    return Trampoline(dispatcher=dispatcher, table_addr=table_addr, table_bytes=table,
-                       initial_reg_value=table_addr, entry_address=dispatcher.gadget.address,
-                       warnings=warnings)
+    table = b"".join(
+        (addr & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
+        for addr in functional_targets
+    )
+    return Trampoline(
+        dispatcher=dispatcher,
+        table_addr=table_addr,
+        table_bytes=table,
+        initial_reg_value=table_addr,
+        entry_address=dispatcher.gadget.address,
+        warnings=warnings,
+    )

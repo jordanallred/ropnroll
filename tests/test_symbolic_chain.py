@@ -3,6 +3,7 @@
 baked address -- so the exploit script can resolve base + offset once it
 actually has a leak, instead of the tool silently baking in the file's own
 linker-preferred-base address (see solve/chain.py's ChainWord)."""
+
 import pytest
 
 from ropnroll.cli.main import _load_pool
@@ -10,7 +11,7 @@ from ropnroll.core import loader, output, scanner
 from ropnroll.core.archinfo import get_archinfo
 from ropnroll.core.gadget import Gadget, Terminator
 from ropnroll.solve import callchain
-from ropnroll.solve.chain import Chain, ChainWord, set_registers
+from ropnroll.solve.chain import Chain, ChainWord
 from ropnroll.solve.pool import GadgetPool
 from tests.helpers import write_minimal_pe
 
@@ -18,6 +19,7 @@ PE_FIXTURE = "tests/fixtures/pe/cli-64.exe"
 
 
 # ---- Image.base_known ------------------------------------------------
+
 
 def test_pie_pe_defaults_to_base_unknown():
     img = loader.load(PE_FIXTURE)
@@ -54,6 +56,7 @@ def test_rebase_preserves_offset_from_base():
 
 # ---- GadgetPool.image_of ----------------------------------------------
 
+
 def test_pool_image_of_roundtrips():
     img = loader.load(PE_FIXTURE)
     pool = GadgetPool()
@@ -64,9 +67,16 @@ def test_pool_image_of_roundtrips():
 
 # ---- Chain / ChainWord tagging (pure, no real scanning needed) --------
 
+
 def _fake_gadget(module: str, address: int, text: str = "pop rax ; ret") -> Gadget:
-    return Gadget(address=address, raw=b"\x58\xc3", text=text, insns=[], terminator=Terminator.RET,
-                  module=module)
+    return Gadget(
+        address=address,
+        raw=b"\x58\xc3",
+        text=text,
+        insns=[],
+        terminator=Terminator.RET,
+        module=module,
+    )
 
 
 def _pool_with(img) -> GadgetPool:
@@ -81,6 +91,7 @@ def test_append_gadget_block_tags_symbolic_when_base_unknown():
     ai = get_archinfo("x86_64")
     g = _fake_gadget(img.path, img.image_base + 0x1000)
     from ropnroll.semantics.effect import GadgetEffect
+
     eff = GadgetEffect(ok=True, sp_delta=8, reg_effects={}, mem_writes=[], mem_reads=[])
 
     chain = Chain(ai=ai)
@@ -97,6 +108,7 @@ def test_append_gadget_block_resolved_when_base_known():
     ai = get_archinfo("x86_64")
     g = _fake_gadget(img.path, img.image_base + 0x1000)
     from ropnroll.semantics.effect import GadgetEffect
+
     eff = GadgetEffect(ok=True, sp_delta=8, reg_effects={}, mem_writes=[], mem_reads=[])
 
     chain = Chain(ai=ai)
@@ -142,6 +154,7 @@ def test_no_pool_means_no_tagging():
     ai = get_archinfo("x86_64")
     g = _fake_gadget("some/module", 0x1000)
     from ropnroll.semantics.effect import GadgetEffect
+
     eff = GadgetEffect(ok=True, sp_delta=8, reg_effects={}, mem_writes=[], mem_reads=[])
     chain = Chain(ai=ai)
     chain.append_gadget_block(g, eff, {})
@@ -149,6 +162,7 @@ def test_no_pool_means_no_tagging():
 
 
 # ---- build_call: the actual "leak later, resolve at exploit time" path
+
 
 def test_call_target_symbolic_without_base_then_resolved_after_rebase():
     pool, images = _load_pool([PE_FIXTURE], scanner.ScanOptions(), use_cache=False)
@@ -161,8 +175,12 @@ def test_call_target_symbolic_without_base_then_resolved_after_rebase():
     assert call_word.offset == 0x1234
 
     new_base = 0x7FFB00000000
-    pool2, images2 = _load_pool([PE_FIXTURE], scanner.ScanOptions(), use_cache=False,
-                                 base=[f"{PE_FIXTURE}={hex(new_base)}"])
+    pool2, images2 = _load_pool(
+        [PE_FIXTURE],
+        scanner.ScanOptions(),
+        use_cache=False,
+        base=[f"{PE_FIXTURE}={hex(new_base)}"],
+    )
     img2 = images2[0]
     target2 = img2.image_base + 0x1234
     res2 = callchain.build_call(pool2, target=target2, args=[], target_module=img2.path)
@@ -174,11 +192,18 @@ def test_call_target_symbolic_without_base_then_resolved_after_rebase():
 
 # ---- output.py: export formats ----------------------------------------
 
+
 def _mixed_chain():
     ai = get_archinfo("x86_64")
     chain = Chain(ai=ai)
-    chain.words.append(ChainWord(0x1400013ac, "0x1400013ac: pop rcx ; ret",
-                                  module="kernel32.dll", offset=0x13ac))
+    chain.words.append(
+        ChainWord(
+            0x1400013AC,
+            "0x1400013ac: pop rcx ; ret",
+            module="kernel32.dll",
+            offset=0x13AC,
+        )
+    )
     chain.words.append(ChainWord(0x41414141, "rcx = 0x41414141"))
     return chain
 
@@ -192,9 +217,10 @@ def test_to_pwntools_emits_symbolic_expression_and_todo_header():
 
 def test_to_json_includes_module_and_offset():
     import json
+
     words = json.loads(output.to_json(_mixed_chain()))
     assert words[0]["module"] == "kernel32.dll"
-    assert words[0]["offset"] == 0x13ac
+    assert words[0]["offset"] == 0x13AC
     assert words[1]["module"] is None
 
 
@@ -211,10 +237,10 @@ def test_to_c_array_refuses_unresolved_chain():
 def test_to_raw_works_once_fully_resolved():
     ai = get_archinfo("x86_64")
     chain = Chain(ai=ai)
-    chain.words.append(ChainWord(0x1400013ac, "resolved word"))
+    chain.words.append(ChainWord(0x1400013AC, "resolved word"))
     data = output.to_raw(chain)
     assert len(data) == 8
-    assert int.from_bytes(data, "little") == 0x1400013ac
+    assert int.from_bytes(data, "little") == 0x1400013AC
 
 
 def test_unresolved_modules_dedupes_and_preserves_order():

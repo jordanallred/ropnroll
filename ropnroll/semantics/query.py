@@ -6,38 +6,40 @@ Grammar (regex-based, deliberately small):
     target := reg | '[' reg (('+'|'-') int)? ']'
     query  := target '=' (int | reg (('+'|'-'|'^'|'&'|'|') int)?)
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
 
-from .effect import EKind, GadgetEffect
+from .effect import EKind
 
 _INT = r"0x[0-9a-fA-F]+|-?\d+"
 _REG = r"[a-zA-Z][a-zA-Z0-9]*"
 _OP = {"+": EKind.ADD, "-": EKind.ADD, "^": EKind.XOR, "&": EKind.AND, "|": EKind.OR}
 
 _RE_MEM_TARGET = re.compile(rf"^\[\s*({_REG})\s*(?:([+-])\s*({_INT}))?\s*\]$")
-_RE_QUERY = re.compile(
-    rf"^\s*(?P<dst>{_REG}|\[[^\]]+\])\s*=\s*(?P<rhs>.+?)\s*$"
-)
+_RE_QUERY = re.compile(rf"^\s*(?P<dst>{_REG}|\[[^\]]+\])\s*=\s*(?P<rhs>.+?)\s*$")
 _RE_RHS_INT = re.compile(rf"^({_INT})$")
 _RE_RHS_REG = re.compile(rf"^({_REG})$")
 _RE_RHS_REGOP = re.compile(rf"^({_REG})\s*([+\-^&|])\s*({_INT})$")
 
 
 def _parse_int(s: str) -> int:
-    return int(s, 16) if s.lower().startswith("0x") or s.lower().startswith("-0x") else int(s)
+    return (
+        int(s, 16)
+        if s.lower().startswith("0x") or s.lower().startswith("-0x")
+        else int(s)
+    )
 
 
 @dataclass
 class Query:
     dst_mem: bool
-    dst: str                 # register name (the target reg, or the base reg if dst_mem)
+    dst: str  # register name (the target reg, or the base reg if dst_mem)
     dst_mem_offset: int = 0
     kind: EKind = EKind.CONST
-    src: Optional[str] = None
+    src: str | None = None
     k: int = 1
     c: int = 0
 
@@ -46,7 +48,11 @@ class Query:
             return False
         if self.kind == EKind.CONST:
             return (eff.c & eff.mask()) == (self.c & eff.mask())
-        return eff.src == self.src and (eff.c & eff.mask()) == (self.c & eff.mask()) and eff.k == self.k
+        return (
+            eff.src == self.src
+            and (eff.c & eff.mask()) == (self.c & eff.mask())
+            and eff.k == self.k
+        )
 
 
 def parse_query(text: str) -> Query:
@@ -70,7 +76,9 @@ def parse_query(text: str) -> Query:
         dst = dst_raw.lower()
 
     if _RE_RHS_INT.match(rhs):
-        return Query(dst_mem, dst, dst_mem_offset, EKind.CONST, None, 1, _parse_int(rhs))
+        return Query(
+            dst_mem, dst, dst_mem_offset, EKind.CONST, None, 1, _parse_int(rhs)
+        )
     if _RE_RHS_REG.match(rhs):
         return Query(dst_mem, dst, dst_mem_offset, EKind.COPY, rhs.lower(), 1, 0)
     mm = _RE_RHS_REGOP.match(rhs)
@@ -96,7 +104,11 @@ def search(pool, query_text: str, limit: int = 20) -> list[tuple]:
             continue
         if q.dst_mem:
             for mw in eff.mem_writes:
-                if mw.addr.src == q.dst and mw.addr.c == q.dst_mem_offset and q.matches_reg_effect(mw.value):
+                if (
+                    mw.addr.src == q.dst
+                    and mw.addr.c == q.dst_mem_offset
+                    and q.matches_reg_effect(mw.value)
+                ):
                     results.append((g, eff, f"*({q.dst}+{q.dst_mem_offset:#x})"))
                     break
         else:

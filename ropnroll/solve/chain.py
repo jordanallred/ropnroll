@@ -8,12 +8,12 @@ always "whatever comes next" -- the next gadget's address, or the final
 call target. That trailing word is left as an open placeholder so chains
 compose by simply filling it in / concatenating.
 """
+
 from __future__ import annotations
 
 import heapq
 import itertools
 from dataclasses import dataclass, field
-from typing import Optional
 
 from ..core.archinfo import ArchInfo
 from ..core.gadget import Gadget
@@ -25,7 +25,7 @@ DEFAULT_JUNK = 0x4141414141414141
 
 @dataclass
 class ChainWord:
-    value: Optional[int]
+    value: int | None
     label: str
     # Set only when `value` was computed against a module whose real
     # runtime base isn't known yet (Image.base_known is False -- an
@@ -39,11 +39,13 @@ class ChainWord:
     # caller who learns the real base later can compute base + offset
     # themselves -- exactly the "leak now, resolve at exploit time"
     # workflow this exists for.
-    module: Optional[str] = None
-    offset: Optional[int] = None
+    module: str | None = None
+    offset: int | None = None
 
 
-def _tag(pool: Optional["GadgetPool"], module: str, address: int) -> tuple[Optional[str], Optional[int]]:
+def _tag(
+    pool: GadgetPool | None, module: str, address: int
+) -> tuple[str | None, int | None]:
     if pool is None or not module:
         return None, None
     img = pool.image_of(module)
@@ -58,12 +60,23 @@ class Chain:
     words: list[ChainWord] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    def append_gadget_block(self, gadget: Gadget, effect: GadgetEffect,
-                             fills: dict[int, tuple[int, str]], pool: Optional["GadgetPool"] = None):
+    def append_gadget_block(
+        self,
+        gadget: Gadget,
+        effect: GadgetEffect,
+        fills: dict[int, tuple[int, str]],
+        pool: GadgetPool | None = None,
+    ):
         w = self.ai.reg_width
         module, offset = _tag(pool, gadget.module, gadget.address)
-        self.words.append(ChainWord(gadget.address, f"0x{gadget.address:x}: {gadget.text}",
-                                     module=module, offset=offset))
+        self.words.append(
+            ChainWord(
+                gadget.address,
+                f"0x{gadget.address:x}: {gadget.text}",
+                module=module,
+                offset=offset,
+            )
+        )
         n_slots = max(0, effect.sp_delta // w - 1)
         for i in range(n_slots):
             off = i * w
@@ -74,25 +87,32 @@ class Chain:
                 self.words.append(ChainWord(None, "junk (unused stack slot)"))
         self.words.append(ChainWord(None, "-> next"))
 
-    def set_last(self, value: int, label: str,
-                 module: Optional[str] = None, offset: Optional[int] = None):
+    def set_last(
+        self,
+        value: int,
+        label: str,
+        module: str | None = None,
+        offset: int | None = None,
+    ):
         word = ChainWord(value, label, module=module, offset=offset)
         if not self.words:
             self.words.append(word)
         else:
             self.words[-1] = word
 
-    def set_last_gadget(self, pool: Optional["GadgetPool"], gadget: Gadget, label: str):
+    def set_last_gadget(self, pool: GadgetPool | None, gadget: Gadget, label: str):
         """Like set_last, but tags the word against `gadget`'s own module
         so an unresolved base stays symbolic instead of being baked in."""
         module, offset = _tag(pool, gadget.module, gadget.address)
         self.set_last(gadget.address, label, module=module, offset=offset)
 
-    def extend(self, other: "Chain"):
+    def extend(self, other: Chain):
         if not other.words:
             return
         first = other.words[0]
-        self.set_last(first.value, first.label, module=first.module, offset=first.offset)
+        self.set_last(
+            first.value, first.label, module=first.module, offset=first.offset
+        )
         self.words.extend(other.words[1:])
         self.warnings.extend(other.warnings)
 
@@ -111,7 +131,7 @@ class Chain:
 
 @dataclass
 class SolveResult:
-    chain: Optional[Chain]
+    chain: Chain | None
     resolved: dict[str, int]
     unresolved: list[str]
     log: list[str]
@@ -163,7 +183,11 @@ def _no_unsafe_memory_access(effect: GadgetEffect, ai: ArchInfo) -> bool:
 
 
 def _gadget_ok(effect: GadgetEffect, ai: ArchInfo) -> bool:
-    return effect.ok and _is_stack_safe(effect, ai) and _no_unsafe_memory_access(effect, ai)
+    return (
+        effect.ok
+        and _is_stack_safe(effect, ai)
+        and _no_unsafe_memory_access(effect, ai)
+    )
 
 
 # candidates are already shortlisted shortest-first; only the cheapest few
@@ -184,8 +208,15 @@ _MAX_EXPAND = 24
 _INDIRECT_BUDGET = 4000
 
 
-def _goal_test(pool: GadgetPool, ai: ArchInfo, reg: str, target_val: int,
-               protect: set[str], avoid: set[str], max_insns: int):
+def _goal_test(
+    pool: GadgetPool,
+    ai: ArchInfo,
+    reg: str,
+    target_val: int,
+    protect: set[str],
+    avoid: set[str],
+    max_insns: int,
+):
     """Can (reg, target_val) be solved in exactly one more gadget? Tries a
     direct "pop reg ; ret"-style load first, then an unconditional
     const-setter. Returns a one-step (gadget, effect, fills) list, or None.
@@ -211,16 +242,30 @@ def _goal_test(pool: GadgetPool, ai: ArchInfo, reg: str, target_val: int,
         if not _gadget_ok(eff, ai):
             continue
         e = eff.reg_effects.get(reg)
-        if e is not None and e.kind == EKind.CONST and (e.c & e.mask()) == (target_val & e.mask()):
+        if (
+            e is not None
+            and e.kind == EKind.CONST
+            and (e.c & e.mask()) == (target_val & e.mask())
+        ):
             if _conflicts(eff, protect, {reg}) or (set(eff.reg_effects) & avoid):
                 continue
             return [(g, eff, {})]
     return None
 
 
-def _solve_register_indirect(pool: GadgetPool, ai: ArchInfo, reg: str, target_val: int,
-                              protect: set[str], avoid: set[str], max_insns: int, max_depth: int,
-                              visited: frozenset[str], memo: dict, budget: list[int]):
+def _solve_register_indirect(
+    pool: GadgetPool,
+    ai: ArchInfo,
+    reg: str,
+    target_val: int,
+    protect: set[str],
+    avoid: set[str],
+    max_insns: int,
+    max_depth: int,
+    visited: frozenset[str],
+    memo: dict,
+    budget: list[int],
+):
     """Best-first (A*) backward-chaining search: "what value would gadget
     g's *source* register need to hold for g to leave `reg` == target_val,
     and can we reach *that*?" Search states are subproblems `(reg,
@@ -269,7 +314,11 @@ def _solve_register_indirect(pool: GadgetPool, ai: ArchInfo, reg: str, target_va
         if prior is not None and prior <= depth:
             return  # a cheaper-or-equal path to this state is already queued
         memo[key] = depth
-        h = 0 if _goal_test(pool, ai, r, tv, protect, avoid, max_insns) is not None else 1
+        h = (
+            0
+            if _goal_test(pool, ai, r, tv, protect, avoid, max_insns) is not None
+            else 1
+        )
         heapq.heappush(frontier, (depth + h, next(seq), r, tv, vis, depth, chain))
 
     push(reg, target_val, visited, 0, [])
@@ -290,7 +339,14 @@ def _solve_register_indirect(pool: GadgetPool, ai: ArchInfo, reg: str, target_va
             if not _gadget_ok(eff, ai):
                 continue
             e = eff.reg_effects.get(r)
-            if e is None or e.kind not in (EKind.COPY, EKind.ADD, EKind.SCALE, EKind.XOR, EKind.AND, EKind.OR):
+            if e is None or e.kind not in (
+                EKind.COPY,
+                EKind.ADD,
+                EKind.SCALE,
+                EKind.XOR,
+                EKind.AND,
+                EKind.OR,
+            ):
                 continue
             if e.src is None or e.src == ai.sp_reg or e.src in vis:
                 continue
@@ -306,8 +362,12 @@ def _solve_register_indirect(pool: GadgetPool, ai: ArchInfo, reg: str, target_va
     return None
 
 
-def set_registers(pool: GadgetPool, targets: dict[str, int],
-                   avoid: set[str] = frozenset(), max_insns: int = 6) -> SolveResult:
+def set_registers(
+    pool: GadgetPool,
+    targets: dict[str, int],
+    avoid: set[str] = frozenset(),
+    max_insns: int = 6,
+) -> SolveResult:
     ai = pool.ai
     remaining = dict(targets)
     fixed: set[str] = set()
@@ -335,9 +395,13 @@ def set_registers(pool: GadgetPool, targets: dict[str, int],
             eff = pool.effect_of(g)
             if not _gadget_ok(eff, ai):
                 continue
-            covers = {r for r in remaining
-                      if (e := eff.reg_effects.get(r)) is not None
-                      and e.kind == EKind.LOAD and e.src == ai.sp_reg}
+            covers = {
+                r
+                for r in remaining
+                if (e := eff.reg_effects.get(r)) is not None
+                and e.kind == EKind.LOAD
+                and e.src == ai.sp_reg
+            }
             if not covers:
                 continue
             if _conflicts(eff, fixed | (set(remaining) - covers), covers):
@@ -350,7 +414,10 @@ def set_registers(pool: GadgetPool, targets: dict[str, int],
         if best is None:
             break
         _, g, eff, covers = best
-        fills = {eff.reg_effects[r].c: (remaining[r], f"{r} = 0x{remaining[r]:x}") for r in covers}
+        fills = {
+            eff.reg_effects[r].c: (remaining[r], f"{r} = 0x{remaining[r]:x}")
+            for r in covers
+        }
         chosen.append((g, eff, fills))
         log.append(f"pop-style: {g.text} @ 0x{g.address:x} sets {sorted(covers)}")
         for r in covers:
@@ -364,9 +431,19 @@ def set_registers(pool: GadgetPool, targets: dict[str, int],
     still = dict(remaining)
     for reg, target_val in still.items():
         protect = fixed | (set(remaining) - {reg})
-        steps = _solve_register_indirect(pool, ai, reg, target_val, protect, avoid,
-                                          max_insns=max_insns, max_depth=4, visited=frozenset(),
-                                          memo={}, budget=[_INDIRECT_BUDGET])
+        steps = _solve_register_indirect(
+            pool,
+            ai,
+            reg,
+            target_val,
+            protect,
+            avoid,
+            max_insns=max_insns,
+            max_depth=4,
+            visited=frozenset(),
+            memo={},
+            budget=[_INDIRECT_BUDGET],
+        )
         if steps is None:
             continue
         chosen.extend(steps)
@@ -385,11 +462,17 @@ def set_registers(pool: GadgetPool, targets: dict[str, int],
         else:
             chain.words = step.words
     for reg in remaining:
-        log.append(f"UNRESOLVED: could not find a gadget to set {reg} = 0x{targets[reg]:x}")
+        log.append(
+            f"UNRESOLVED: could not find a gadget to set {reg} = 0x{targets[reg]:x}"
+        )
 
     # an empty chain (e.g. calling a zero-argument function) is a valid,
     # fully-resolved result -- only a genuinely unresolved target should
     # make the caller treat this as a failure.
     ok_chain = chain if not remaining else None
-    return SolveResult(chain=ok_chain, resolved={r: targets[r] for r in fixed},
-                        unresolved=sorted(remaining), log=log)
+    return SolveResult(
+        chain=ok_chain,
+        resolved={r: targets[r] for r in fixed},
+        unresolved=sorted(remaining),
+        log=log,
+    )

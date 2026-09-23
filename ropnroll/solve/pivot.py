@@ -12,6 +12,7 @@ pointer would require knowing where the fake stack lives, which is
 target-specific. A syntactic classifier is exactly as precise here and
 works even when full effect emulation of the gadget can't succeed.
 """
+
 from __future__ import annotations
 
 import re
@@ -34,7 +35,7 @@ _PATTERNS = [
 class Pivot:
     gadget: Gadget
     kind: str
-    rank: int          # lower = more directly useful (pure pivots first)
+    rank: int  # lower = more directly useful (pure pivots first)
 
 
 def find_pivots(pool: GadgetPool, max_insns: int = 4) -> list[Pivot]:

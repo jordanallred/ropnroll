@@ -17,47 +17,59 @@ like multiplies of two *variable* registers, or flag-dependent instructions
 we don't model, can) is recorded as UNKNOWN with one concrete sample so the
 gadget is still visible, just not usable as an exact primitive.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
 
 
 class EKind(Enum):
-    CONST = auto()     # dst = c
-    COPY = auto()       # dst = src              (add/scale with k=1,c=0)
-    ADD = auto()         # dst = src + c
-    SCALE = auto()        # dst = src * k + c
-    AND = auto()           # dst = src & c
-    OR = auto()              # dst = src | c
-    XOR = auto()               # dst = src ^ c
-    LOAD = auto()                # dst = mem[src * k + c]   (memory read)
+    CONST = auto()  # dst = c
+    COPY = auto()  # dst = src              (add/scale with k=1,c=0)
+    ADD = auto()  # dst = src + c
+    SCALE = auto()  # dst = src * k + c
+    AND = auto()  # dst = src & c
+    OR = auto()  # dst = src | c
+    XOR = auto()  # dst = src ^ c
+    LOAD = auto()  # dst = mem[src * k + c]   (memory read)
     UNKNOWN = auto()
 
 
 @dataclass
 class RegEffect:
     kind: EKind
-    src: Optional[str] = None
+    src: str | None = None
     k: int = 1
     c: int = 0
     size: int = 8
-    sample: Optional[int] = None
+    sample: int | None = None
 
     def mask(self) -> int:
         return (1 << (self.size * 8)) - 1
 
     def to_dict(self) -> dict:
-        return {"kind": self.kind.name, "src": self.src, "k": self.k, "c": self.c,
-                "size": self.size, "sample": self.sample}
+        return {
+            "kind": self.kind.name,
+            "src": self.src,
+            "k": self.k,
+            "c": self.c,
+            "size": self.size,
+            "sample": self.sample,
+        }
 
     @staticmethod
-    def from_dict(d: dict) -> "RegEffect":
-        return RegEffect(kind=EKind[d["kind"]], src=d["src"], k=d["k"], c=d["c"],
-                          size=d["size"], sample=d["sample"])
+    def from_dict(d: dict) -> RegEffect:
+        return RegEffect(
+            kind=EKind[d["kind"]],
+            src=d["src"],
+            k=d["k"],
+            c=d["c"],
+            size=d["size"],
+            sample=d["sample"],
+        )
 
-    def value_given(self, src_val: int) -> Optional[int]:
+    def value_given(self, src_val: int) -> int | None:
         m = self.mask()
         if self.kind == EKind.CONST:
             return self.c & m
@@ -71,7 +83,7 @@ class RegEffect:
             return (src_val ^ self.c) & m
         return None
 
-    def solve_for_target(self, target: int) -> Optional[int]:
+    def solve_for_target(self, target: int) -> int | None:
         """Return the required *source* register value to make this effect
         produce `target`, or None if not exactly solvable."""
         m = self.mask()
@@ -105,7 +117,11 @@ class RegEffect:
             return f"{dst} = {self.src}"
         if self.kind == EKind.ADD:
             sign = "+" if self.c >= 0 else "-"
-            return f"{dst} = {self.src} {sign} 0x{abs(self.c):x}" if self.c else f"{dst} = {self.src}"
+            return (
+                f"{dst} = {self.src} {sign} 0x{abs(self.c):x}"
+                if self.c
+                else f"{dst} = {self.src}"
+            )
         if self.kind == EKind.SCALE:
             return f"{dst} = {self.src}*{self.k} + 0x{self.c & self.mask():x}"
         if self.kind == EKind.AND:
@@ -117,13 +133,17 @@ class RegEffect:
         if self.kind == EKind.LOAD:
             off = f"+0x{self.c:x}" if self.c else ""
             return f"{dst} = [{self.src}{off}]"
-        return f"{dst} = ? (sample=0x{self.sample:x})" if self.sample is not None else f"{dst} = ?"
+        return (
+            f"{dst} = ? (sample=0x{self.sample:x})"
+            if self.sample is not None
+            else f"{dst} = ?"
+        )
 
 
 @dataclass
 class MemEffect:
-    addr: RegEffect          # how the written/read address is derived from a GPR
-    value: Optional[RegEffect]  # how the stored value is derived (None for reads)
+    addr: RegEffect  # how the written/read address is derived from a GPR
+    value: RegEffect | None  # how the stored value is derived (None for reads)
     size: int
     is_write: bool
 
@@ -135,14 +155,21 @@ class MemEffect:
         return f"read *({a})"
 
     def to_dict(self) -> dict:
-        return {"addr": self.addr.to_dict(), "value": self.value.to_dict() if self.value else None,
-                "size": self.size, "is_write": self.is_write}
+        return {
+            "addr": self.addr.to_dict(),
+            "value": self.value.to_dict() if self.value else None,
+            "size": self.size,
+            "is_write": self.is_write,
+        }
 
     @staticmethod
-    def from_dict(d: dict) -> "MemEffect":
-        return MemEffect(addr=RegEffect.from_dict(d["addr"]),
-                          value=RegEffect.from_dict(d["value"]) if d["value"] else None,
-                          size=d["size"], is_write=d["is_write"])
+    def from_dict(d: dict) -> MemEffect:
+        return MemEffect(
+            addr=RegEffect.from_dict(d["addr"]),
+            value=RegEffect.from_dict(d["value"]) if d["value"] else None,
+            size=d["size"],
+            is_write=d["is_write"],
+        )
 
 
 @dataclass
@@ -150,8 +177,8 @@ class GadgetEffect:
     reg_effects: dict[str, RegEffect] = field(default_factory=dict)
     mem_writes: list[MemEffect] = field(default_factory=list)
     mem_reads: list[MemEffect] = field(default_factory=list)
-    sp_delta: Optional[int] = None       # net stack-pointer change, if constant
-    ok: bool = True                      # emulation completed without a hard fault
+    sp_delta: int | None = None  # net stack-pointer change, if constant
+    ok: bool = True  # emulation completed without a hard fault
     notes: str = ""
 
     def clobbers(self) -> set[str]:
@@ -172,10 +199,14 @@ class GadgetEffect:
         }
 
     @staticmethod
-    def from_dict(d: dict) -> "GadgetEffect":
+    def from_dict(d: dict) -> GadgetEffect:
         return GadgetEffect(
-            reg_effects={r: RegEffect.from_dict(e) for r, e in d["reg_effects"].items()},
+            reg_effects={
+                r: RegEffect.from_dict(e) for r, e in d["reg_effects"].items()
+            },
             mem_writes=[MemEffect.from_dict(m) for m in d["mem_writes"]],
             mem_reads=[MemEffect.from_dict(m) for m in d["mem_reads"]],
-            sp_delta=d["sp_delta"], ok=d["ok"], notes=d["notes"],
+            sp_delta=d["sp_delta"],
+            ok=d["ok"],
+            notes=d["notes"],
         )

@@ -14,6 +14,7 @@ def _isolated_ropnroll_cache_dir(tmp_path_factory):
     developer's real ~/.cache/ropnroll instead of an isolated location."""
     os.environ["ROPNROLL_CACHE_DIR"] = str(tmp_path_factory.mktemp("ropnroll_cache"))
 
+
 _NTDLL_CANDIDATES = [
     r"C:\Windows\System32\ntdll.dll",
     r"C:\Windows\SysWOW64\ntdll.dll",

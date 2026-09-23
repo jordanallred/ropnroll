@@ -12,6 +12,7 @@ bytes within that file, mirroring the existing in-memory cache key in
 SemanticEngine. A version stamp guards against a future engine change silently
 serving stale results from an old cache file.
 """
+
 from __future__ import annotations
 
 import atexit
@@ -19,7 +20,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from ..semantics.effect import GadgetEffect
 
@@ -41,7 +41,7 @@ class EffectDiskCache:
     -> serialized GadgetEffect. Reads are lazy; writes are buffered in memory and
     flushed once via atexit, since the CLI is a one-shot process per invocation."""
 
-    def __init__(self, sha256: str, version: int, root: Optional[Path] = None):
+    def __init__(self, sha256: str, version: int, root: Path | None = None):
         self.path = (root or cache_dir()) / "effects" / f"{sha256}.json"
         self.version = version
         self._entries: dict[bytes, GadgetEffect] = {}
@@ -66,7 +66,7 @@ class EffectDiskCache:
             except (KeyError, ValueError, TypeError):
                 continue  # corrupt entry -- skip rather than fail the whole cache
 
-    def get(self, raw: bytes) -> Optional[GadgetEffect]:
+    def get(self, raw: bytes) -> GadgetEffect | None:
         self._load()
         return self._entries.get(raw)
 
@@ -80,8 +80,12 @@ class EffectDiskCache:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            data = {"version": self.version,
-                    "effects": {raw.hex(): eff.to_dict() for raw, eff in self._entries.items()}}
+            data = {
+                "version": self.version,
+                "effects": {
+                    raw.hex(): eff.to_dict() for raw, eff in self._entries.items()
+                },
+            }
             tmp = self.path.with_suffix(".tmp")
             with open(tmp, "w") as f:
                 json.dump(data, f)
@@ -114,12 +118,14 @@ class GadgetScanCache:
     mismatched results -- either one changing treats the cache as cold.
     """
 
-    def __init__(self, sha256: str, scan_key: str, version: int, root: Optional[Path] = None):
+    def __init__(
+        self, sha256: str, scan_key: str, version: int, root: Path | None = None
+    ):
         self.path = (root or cache_dir()) / "scans" / f"{sha256}.json"
         self.scan_key = scan_key
         self.version = version
 
-    def get(self) -> Optional[list[tuple[int, bytes, str]]]:
+    def get(self) -> list[tuple[int, bytes, str]] | None:
         try:
             with open(self.path, "r") as f:
                 data = json.load(f)
@@ -128,15 +134,21 @@ class GadgetScanCache:
         if data.get("version") != self.version or data.get("scan_key") != self.scan_key:
             return None  # stale schema/scanner version or different scan options -- cold cache
         try:
-            return [(rva, bytes.fromhex(raw_hex), term) for rva, raw_hex, term in data["gadgets"]]
+            return [
+                (rva, bytes.fromhex(raw_hex), term)
+                for rva, raw_hex, term in data["gadgets"]
+            ]
         except (KeyError, ValueError, TypeError):
             return None  # corrupt cache -- treat as cold rather than fail the scan
 
     def put(self, gadgets: list[tuple[int, bytes, str]]):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            data = {"version": self.version, "scan_key": self.scan_key,
-                    "gadgets": [[rva, raw.hex(), term] for rva, raw, term in gadgets]}
+            data = {
+                "version": self.version,
+                "scan_key": self.scan_key,
+                "gadgets": [[rva, raw.hex(), term] for rva, raw, term in gadgets],
+            }
             tmp = self.path.with_suffix(".tmp")
             with open(tmp, "w") as f:
                 json.dump(data, f)

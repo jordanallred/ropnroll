@@ -3,12 +3,14 @@ push stack args for cdecl/stdcall), then transfer control to the target
 function address directly (classic "return into a DLL export" -- the
 callee's own `ret` is what would normally pop a return address, so we let
 the caller decide what -- if anything -- goes there via Chain.set_last)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from ..core.archinfo import ArchInfo
 from ..core.gadget import Terminator
+from ..core.loader import Image
 from .chain import Chain, ChainWord, SolveResult, _tag, set_registers
 from .pool import GadgetPool
 
@@ -17,6 +19,19 @@ from .pool import GadgetPool
 # above the return address, which the callee's prologue may spill into.
 _MS64_ARGS = ["rcx", "rdx", "r8", "r9"]
 _MS64_SHADOW_SPACE = 0x20
+
+# CET shadow stack (/CETCOMPAT) checks every `ret` against a hardware-
+# maintained copy of the call stack -- it is what actually decides whether a
+# return-based chain can run at all, independent of any individual gadget.
+# find_dispatchers (solve/jop.py) already steers JOP chains around CFG/CET-
+# IBT; this is the same steering for the *other* half of the tool.
+_CET_WARNING = (
+    "target is CET shadow-stack compatible (/CETCOMPAT): a return-based ROP "
+    "chain's `ret` instructions are checked against the hardware shadow stack "
+    "and will fault as soon as one doesn't match what a real `call` pushed -- "
+    "i.e. on the very first gadget here. Consider `ropnroll jop` (call/jmp-"
+    "through-register chaining) instead; CET's shadow stack does not check those."
+)
 
 
 @dataclass
@@ -37,9 +52,17 @@ def arg_regs(ai: ArchInfo, os: str) -> list[str]:
     return ai.call_arg_regs
 
 
-def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | None = None,
-                avoid: set = frozenset(), max_insns: int = 6,
-                bytes_before_chain: int | None = None, target_module: str | None = None) -> CallResult:
+def build_call(
+    pool: GadgetPool,
+    target: int,
+    args: list[int],
+    return_to: int | None = None,
+    avoid: set = frozenset(),
+    max_insns: int = 6,
+    bytes_before_chain: int | None = None,
+    target_module: str | None = None,
+    img: Image | None = None,
+) -> CallResult:
     """`bytes_before_chain`: how many bytes of payload precede this chain
     in the final buffer (e.g. the overflow padding before it starts) --
     when given, on x86-64 SysV this automatically inserts a single bare
@@ -51,13 +74,20 @@ def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | 
     easy-to-miss ret2libc gotcha. Omit this if you don't know/care about
     what precedes the chain; the chain still works, it just isn't
     alignment-corrected.
+
+    `img`: the primary target Image, if you have one handy -- used only to
+    warn (via the returned chain's `warnings`) when CET shadow stack would
+    reject this return-based chain outright. Purely advisory; omitting it
+    just means you don't get the warning.
     """
     ai = pool.ai
     argregs = arg_regs(ai, pool.os)
     if argregs:
         if len(args) > len(argregs):
-            raise ValueError(f"{ai.arch}/{pool.os} register-passed args max is {len(argregs)}, "
-                              f"got {len(args)} (stack-spilled args not yet supported)")
+            raise ValueError(
+                f"{ai.arch}/{pool.os} register-passed args max is {len(argregs)}, "
+                f"got {len(args)} (stack-spilled args not yet supported)"
+            )
         targets = {argregs[i]: v for i, v in enumerate(args)}
         res = set_registers(pool, targets, avoid=avoid, max_insns=max_insns)
         if not res.ok or res.chain is None:
@@ -65,20 +95,32 @@ def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | 
         chain = res.chain
 
         if bytes_before_chain is not None and ai.arch == "x86_64" and ai.reg_width == 8:
-            target_word_offset = bytes_before_chain + (len(chain.words) - 1) * ai.reg_width
+            target_word_offset = (
+                bytes_before_chain + (len(chain.words) - 1) * ai.reg_width
+            )
             if target_word_offset % 16 != 0:
-                pads = [g for g in pool.shortlist_terminator(Terminator.RET, max_insns=1) if g.n_insns == 1]
+                pads = [
+                    g
+                    for g in pool.shortlist_terminator(Terminator.RET, max_insns=1)
+                    if g.n_insns == 1
+                ]
                 if pads:
-                    chain.set_last_gadget(pool, pads[0], f"alignment pad (bare ret) 0x{pads[0].address:x}")
+                    chain.set_last_gadget(
+                        pool, pads[0], f"alignment pad (bare ret) 0x{pads[0].address:x}"
+                    )
                     chain.words.append(ChainWord(None, "-> next"))
 
         t_module, t_offset = _tag(pool, target_module, target)
-        chain.set_last(target, f"call target 0x{target:x}", module=t_module, offset=t_offset)
+        chain.set_last(
+            target, f"call target 0x{target:x}", module=t_module, offset=t_offset
+        )
         if ai.arch == "x86_64" and pool.os == "windows":
             for i in range(_MS64_SHADOW_SPACE // ai.reg_width):
                 chain.append_raw(0, "MS x64 shadow space (callee may spill args here)")
         if return_to is not None:
             chain.append_raw(return_to, f"return address after call 0x{return_to:x}")
+        if img is not None and img.mitigations.get("cet"):
+            chain.warnings.append(_CET_WARNING)
         return CallResult(chain=chain, solve=res, ok=True)
     else:
         # cdecl/stdcall (x86): arguments live on the stack, pushed right
@@ -86,12 +128,20 @@ def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | 
         # target's `ret` will look for its own return address).
         chain = Chain(ai=ai)
         t_module, t_offset = _tag(pool, target_module, target)
-        chain.words.append(ChainWord(target, f"call target 0x{target:x}", module=t_module, offset=t_offset))
+        chain.words.append(
+            ChainWord(
+                target, f"call target 0x{target:x}", module=t_module, offset=t_offset
+            )
+        )
         if return_to is not None:
             chain.append_raw(return_to, f"return address after call 0x{return_to:x}")
         else:
             chain.append_raw(0, "return address (unused placeholder)")
         for i, a in enumerate(args):
             chain.append_raw(a, f"stack arg[{i}] = 0x{a:x}")
-        res = SolveResult(chain=chain, resolved={}, unresolved=[], log=["cdecl: args pushed on stack"])
+        if img is not None and img.mitigations.get("cet"):
+            chain.warnings.append(_CET_WARNING)
+        res = SolveResult(
+            chain=chain, resolved={}, unresolved=[], log=["cdecl: args pushed on stack"]
+        )
         return CallResult(chain=chain, solve=res, ok=True)

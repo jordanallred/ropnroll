@@ -7,6 +7,7 @@ from raw machine code (via keystone) are wrapped in the smallest PE LIEF
 will parse correctly: a real file on disk, read back through the same
 loader.load() path everything else uses, not a mocked-up Image.
 """
+
 from __future__ import annotations
 
 import struct
@@ -38,47 +39,97 @@ def write_minimal_pe(path: str, arch: str, code: bytes, base: int = 0x400000) ->
     dos_header = b"MZ" + b"\x00" * 58 + struct.pack("<I", 64)  # e_lfanew = 64
     assert len(dos_header) == 64
 
-    characteristics = 0x0002 | (0x0100 if bits == 32 else 0x0020)  # EXECUTABLE_IMAGE, +32BIT_MACHINE/LARGE_ADDRESS_AWARE
-    file_header = struct.pack("<HHIIIHH", machine, n_sections, 0, 0, 0, opt_size, characteristics)
+    characteristics = 0x0002 | (
+        0x0100 if bits == 32 else 0x0020
+    )  # EXECUTABLE_IMAGE, +32BIT_MACHINE/LARGE_ADDRESS_AWARE
+    file_header = struct.pack(
+        "<HHIIIHH", machine, n_sections, 0, 0, 0, opt_size, characteristics
+    )
 
     subsystem = 3  # IMAGE_SUBSYSTEM_WINDOWS_CUI
     if bits == 64:
         opt_header = struct.pack(
             "<HBBIIIIIQIIHHHHHHIIIIHHQQQQII",
-            0x20B, 0, 0,
-            code_raw_size, 0, 0,
-            code_rva, code_rva,
-            base,
-            align, align,
-            0, 0, 0, 0, 0, 0,
+            0x20B,
             0,
-            size_of_image, size_of_headers, 0,
-            subsystem, 0,
-            0x100000, 0x1000, 0x100000, 0x1000,
-            0, 16,
+            0,
+            code_raw_size,
+            0,
+            0,
+            code_rva,
+            code_rva,
+            base,
+            align,
+            align,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            size_of_image,
+            size_of_headers,
+            0,
+            subsystem,
+            0,
+            0x100000,
+            0x1000,
+            0x100000,
+            0x1000,
+            0,
+            16,
         )
     else:
         opt_header = struct.pack(
             "<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII",
-            0x10B, 0, 0,
-            code_raw_size, 0, 0,
-            code_rva, code_rva, code_rva,
-            base,
-            align, align,
-            0, 0, 0, 0, 0, 0,
+            0x10B,
             0,
-            size_of_image, size_of_headers, 0,
-            subsystem, 0,
-            0x100000, 0x1000, 0x100000, 0x1000,
-            0, 16,
+            0,
+            code_raw_size,
+            0,
+            0,
+            code_rva,
+            code_rva,
+            code_rva,
+            base,
+            align,
+            align,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            size_of_image,
+            size_of_headers,
+            0,
+            subsystem,
+            0,
+            0x100000,
+            0x1000,
+            0x100000,
+            0x1000,
+            0,
+            16,
         )
     opt_header += b"\x00" * (8 * 16)  # 16 empty IMAGE_DATA_DIRECTORY entries
 
     name = b".text\x00\x00\x00"
     section_chars = 0x20 | 0x20000000 | 0x40000000  # CNT_CODE | MEM_EXECUTE | MEM_READ
     section_header = struct.pack(
-        "<8sIIIIIIHHI", name, len(code), code_rva, code_raw_size, size_of_headers,
-        0, 0, 0, 0, section_chars,
+        "<8sIIIIIIHHI",
+        name,
+        len(code),
+        code_rva,
+        code_raw_size,
+        size_of_headers,
+        0,
+        0,
+        0,
+        0,
+        section_chars,
     )
 
     headers = dos_header + b"PE\x00\x00" + file_header + opt_header + section_header

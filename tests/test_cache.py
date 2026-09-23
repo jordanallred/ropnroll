@@ -11,9 +11,14 @@ def _sample_effect() -> GadgetEffect:
             "rdi": RegEffect(kind=EKind.LOAD, src="rsp", k=1, c=8, size=8),
             "rax": RegEffect(kind=EKind.ADD, src="rbx", k=1, c=5, size=8),
         },
-        mem_writes=[MemEffect(addr=RegEffect(kind=EKind.COPY, src="rsp", size=8),
-                               value=RegEffect(kind=EKind.CONST, c=0x41, size=8),
-                               size=8, is_write=True)],
+        mem_writes=[
+            MemEffect(
+                addr=RegEffect(kind=EKind.COPY, src="rsp", size=8),
+                value=RegEffect(kind=EKind.CONST, c=0x41, size=8),
+                size=8,
+                is_write=True,
+            )
+        ],
         mem_reads=[],
         sp_delta=16,
         ok=True,
@@ -74,12 +79,20 @@ def test_scan_cache_version_mismatch_is_cold(tmp_path):
 
 
 def test_scan_cache_option_mismatch_is_cold(tmp_path):
-    cache = GadgetScanCache("deadbeef", _scan_key(scanner.ScanOptions(max_insns=4)),
-                             SCANNER_VERSION, root=tmp_path)
+    cache = GadgetScanCache(
+        "deadbeef",
+        _scan_key(scanner.ScanOptions(max_insns=4)),
+        SCANNER_VERSION,
+        root=tmp_path,
+    )
     cache.put([(0x10, b"\x5f\xc3", "RET")])
 
-    other = GadgetScanCache("deadbeef", _scan_key(scanner.ScanOptions(max_insns=6)),
-                             SCANNER_VERSION, root=tmp_path)
+    other = GadgetScanCache(
+        "deadbeef",
+        _scan_key(scanner.ScanOptions(max_insns=6)),
+        SCANNER_VERSION,
+        root=tmp_path,
+    )
     assert other.get() is None
 
 
@@ -93,12 +106,14 @@ def test_scan_image_warm_cache_matches_fresh_scan(ntdll_path):
     assert fresh
 
     warm = scanner.scan_image(img, opts, use_cache=True)
-    assert [(g.address, g.raw, g.terminator) for g in warm] == \
-           [(g.address, g.raw, g.terminator) for g in fresh]
+    assert [(g.address, g.raw, g.terminator) for g in warm] == [
+        (g.address, g.raw, g.terminator) for g in fresh
+    ]
 
     cached_only = scanner.scan_image(img, opts, use_cache=True)
-    assert [(g.address, g.raw, g.text, g.terminator) for g in cached_only] == \
-           [(g.address, g.raw, g.text, g.terminator) for g in fresh]
+    assert [(g.address, g.raw, g.text, g.terminator) for g in cached_only] == [
+        (g.address, g.raw, g.text, g.terminator) for g in fresh
+    ]
 
 
 def test_semantic_engine_warm_cache_matches_fresh_computation(ntdll_path, tmp_path):
@@ -107,6 +122,7 @@ def test_semantic_engine_warm_cache_matches_fresh_computation(ntdll_path, tmp_pa
     assert gadgets
 
     from ropnroll.core.archinfo import get_archinfo
+
     ai = get_archinfo(img.arch, img.little_endian)
 
     fresh_engine = SemanticEngine(img, ai, disk_cache=None)

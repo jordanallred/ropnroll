@@ -9,6 +9,7 @@ script/data resolves them once *it* has a leak), while raw/c_array need
 real bytes on disk and refuse rather than silently write a dev-time
 placeholder address into what looks like a finished payload.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,7 +54,9 @@ def to_pwntools(chain: Chain, var_name: str = "payload", pack_call: str = "p64")
     lines = []
     unresolved = unresolved_modules(chain)
     for m in unresolved:
-        lines.append(f"{_base_var(m)} = 0  # TODO: leaked runtime base of {Path(m).name}")
+        lines.append(
+            f"{_base_var(m)} = 0  # TODO: leaked runtime base of {Path(m).name}"
+        )
     if unresolved:
         lines.append("")
     lines.append(f"{var_name} = flat(")
@@ -68,21 +71,31 @@ def to_raw(chain: Chain, little_endian: bool = True) -> bytes:
     unresolved = unresolved_modules(chain)
     if unresolved:
         raise ValueError(
-            "chain has unresolved symbolic addresses for: " + ", ".join(unresolved) +
-            " -- raw bytes would bake in a dev-time placeholder address, not the real "
+            "chain has unresolved symbolic addresses for: "
+            + ", ".join(unresolved)
+            + " -- raw bytes would bake in a dev-time placeholder address, not the real "
             "runtime one. Pass --base <module>=0xADDR for each once you have a leak, "
-            "or use --emit pwntools/json to keep the chain symbolic.")
+            "or use --emit pwntools/json to keep the chain symbolic."
+        )
     return chain.to_bytes(little_endian=little_endian)
 
 
-def to_c_array(chain: Chain, var_name: str = "payload", little_endian: bool = True) -> str:
+def to_c_array(
+    chain: Chain, var_name: str = "payload", little_endian: bool = True
+) -> str:
     raw = to_raw(chain, little_endian=little_endian)  # same guard applies here
     body = ", ".join(f"0x{b:02x}" for b in raw)
     return f"unsigned char {var_name}[{len(raw)}] = {{ {body} }};"
 
+
 def to_json(chain: Chain) -> str:
-    return json.dumps([{"value": w.value, "label": w.label, "module": w.module, "offset": w.offset}
-                        for w in chain.words], indent=2)
+    return json.dumps(
+        [
+            {"value": w.value, "label": w.label, "module": w.module, "offset": w.offset}
+            for w in chain.words
+        ],
+        indent=2,
+    )
 
 
 def stack_layout(chain: Chain, base_label: str = "rsp+") -> str:
@@ -105,8 +118,10 @@ def stack_layout(chain: Chain, base_label: str = "rsp+") -> str:
     # (a common two-binary `call` target/gadget-source split) staggers
     # every row after the first long one.
     val_width = max([len("value")] + [len(v) for v in vals])
-    lines = [f"  offset   {'value'.ljust(val_width)}  purpose",
-             f"  ------   {'-' * val_width}  -------"]
+    lines = [
+        f"  offset   {'value'.ljust(val_width)}  purpose",
+        f"  ------   {'-' * val_width}  -------",
+    ]
     for i, (word, val) in enumerate(zip(chain.words, vals)):
         off = i * w
         lines.append(f"  +0x{off:04x}  {val.ljust(val_width)}  {word.label}")

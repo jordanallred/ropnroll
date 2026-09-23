@@ -12,14 +12,14 @@ consistent* -- every gadget decodes and behaves the way the solver assumed,
 nothing double-clobbers a register you needed, and you find out now
 instead of after firing it at a real target once.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import unicorn as uc
 
-from ..core.archinfo import ArchInfo, get_archinfo
+from ..core.archinfo import get_archinfo
 from ..core.loader import Image
 from ..solve.chain import Chain
 
@@ -34,20 +34,28 @@ def _align_down(x, a):
 class VerifyReport:
     ok: bool
     reached_target: bool
-    fault: Optional[str] = None
-    fault_address: Optional[int] = None
-    last_gadget_context: Optional[str] = None
+    fault: str | None = None
+    fault_address: int | None = None
+    last_gadget_context: str | None = None
     instructions_executed: int = 0
     final_regs: dict[str, int] = field(default_factory=dict)
-    goal_results: dict[str, tuple] = field(default_factory=dict)   # reg -> (ok, expected, actual)
+    goal_results: dict[str, tuple] = field(
+        default_factory=dict
+    )  # reg -> (ok, expected, actual)
     trace: list[int] = field(default_factory=list)
 
 
-def verify_chain(img: Image | list[Image], chain: Chain, *, final_target: Optional[int] = None,
-                  goal_regs: Optional[dict[str, int]] = None,
-                  initial_regs: Optional[dict[str, int]] = None,
-                  stack_addr: int = STACK_ADDR_DEFAULT, max_insns: int = 20000,
-                  trace_limit: int = 64) -> VerifyReport:
+def verify_chain(
+    img: Image | list[Image],
+    chain: Chain,
+    *,
+    final_target: int | None = None,
+    goal_regs: dict[str, int] | None = None,
+    initial_regs: dict[str, int] | None = None,
+    stack_addr: int = STACK_ADDR_DEFAULT,
+    max_insns: int = 20000,
+    trace_limit: int = 64,
+) -> VerifyReport:
     """`img` is normally the single binary a chain's gadgets came from, but
     a chain built with `call`/`syscall` against multiple `--binary` paths
     (e.g. gadgets from a target EXE calling into a function that only
@@ -69,7 +77,7 @@ def verify_chain(img: Image | list[Image], chain: Chain, *, final_target: Option
                 continue  # already mapped -- e.g. re-verifying, or an overlap with another image
             buf = bytearray(end - base)
             pad = seg.vaddr - base
-            buf[pad:pad + seg.size] = seg.data
+            buf[pad : pad + seg.size] = seg.data
             mu.mem_write(base, bytes(buf))
 
     chain_bytes = chain.to_bytes(little_endian=imgs[0].little_endian)
@@ -137,13 +145,23 @@ def verify_chain(img: Image | list[Image], chain: Chain, *, final_target: Option
     if fault_addr is not None:
         best = None
         for w in chain.words:
-            if w.value is not None and w.value <= fault_addr and (best is None or w.value > best.value):
+            if (
+                w.value is not None
+                and w.value <= fault_addr
+                and (best is None or w.value > best.value)
+            ):
                 best = w
         context = best.label if best else None
 
     ok = (fault is None) and (final_target is None or reached[0]) and all_goals_ok
     return VerifyReport(
-        ok=ok, reached_target=reached[0], fault=fault, fault_address=fault_addr,
-        last_gadget_context=context, instructions_executed=executed[0],
-        final_regs=final_regs, goal_results=goal_results, trace=trace,
+        ok=ok,
+        reached_target=reached[0],
+        fault=fault,
+        fault_address=fault_addr,
+        last_gadget_context=context,
+        instructions_executed=executed[0],
+        final_regs=final_regs,
+        goal_results=goal_results,
+        trace=trace,
     )

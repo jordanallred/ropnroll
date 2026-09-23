@@ -21,10 +21,8 @@ Trial design, per gadget:
     every trial wins; ties basically never happen because the basis
     includes 0 and all-ones, which pin down masks/consts uniquely.
 """
-from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from __future__ import annotations
 
 import capstone as cs
 import unicorn as uc
@@ -49,10 +47,14 @@ def _build_x86_subreg_map(bits: int) -> dict[str, str]:
     everything normalized to the architecture's canonical GPR name so a
     32-bit write is recognized as affecting the register we track."""
     groups64 = [
-        ("rax", "eax", "ax", "al", "ah"), ("rbx", "ebx", "bx", "bl", "bh"),
-        ("rcx", "ecx", "cx", "cl", "ch"), ("rdx", "edx", "dx", "dl", "dh"),
-        ("rsi", "esi", "si", "sil", None), ("rdi", "edi", "di", "dil", None),
-        ("rbp", "ebp", "bp", "bpl", None), ("rsp", "esp", "sp", "spl", None),
+        ("rax", "eax", "ax", "al", "ah"),
+        ("rbx", "ebx", "bx", "bl", "bh"),
+        ("rcx", "ecx", "cx", "cl", "ch"),
+        ("rdx", "edx", "dx", "dl", "dh"),
+        ("rsi", "esi", "si", "sil", None),
+        ("rdi", "edi", "di", "dil", None),
+        ("rbp", "ebp", "bp", "bpl", None),
+        ("rsp", "esp", "sp", "spl", None),
     ]
     groups32 = [(g[1], g[2], g[3], g[4]) for g in groups64]  # target = 32-bit form
     m: dict[str, str] = {}
@@ -86,16 +88,41 @@ def _x86_reg_write_width(raw_name: str, bits: int) -> int:
     """
     if bits != 64:
         return 4
-    if raw_name in ("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp") or \
-            raw_name in (f"r{i}" for i in range(8, 16)):
+    if raw_name in (
+        "rax",
+        "rbx",
+        "rcx",
+        "rdx",
+        "rsi",
+        "rdi",
+        "rbp",
+        "rsp",
+    ) or raw_name in (f"r{i}" for i in range(8, 16)):
         return 8
-    if raw_name in ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp") or \
-            raw_name in (f"r{i}d" for i in range(8, 16)):
+    if raw_name in (
+        "eax",
+        "ebx",
+        "ecx",
+        "edx",
+        "esi",
+        "edi",
+        "ebp",
+        "esp",
+    ) or raw_name in (f"r{i}d" for i in range(8, 16)):
         return 4
-    return 8  # 16/8-bit sub-write: treat conservatively as full-width (merge, not replace)
+    return (
+        8  # 16/8-bit sub-write: treat conservatively as full-width (merge, not replace)
+    )
 
-_K_DATA_BASIS_TEMPLATE = [0x0, "ALLONES", 0x1111111111111111, 0x5A5A5A5A5A5A5A5A,
-                          0xDEADBEEFCAFEBABE, 0x0123456789ABCDEF]
+
+_K_DATA_BASIS_TEMPLATE = [
+    0x0,
+    "ALLONES",
+    0x1111111111111111,
+    0x5A5A5A5A5A5A5A5A,
+    0xDEADBEEFCAFEBABE,
+    0x0123456789ABCDEF,
+]
 
 STACK_SIZE = 0x8000
 SCRATCH_LANE_SIZE = 0x1000
@@ -123,14 +150,18 @@ def _fill_pattern(size: int) -> bytes:
 
 
 class SemanticEngine:
-    def __init__(self, img: Image, ai: ArchInfo, disk_cache: Optional[EffectDiskCache] = None):
+    def __init__(
+        self, img: Image, ai: ArchInfo, disk_cache: EffectDiskCache | None = None
+    ):
         self.img = img
         self.ai = ai
         self.width_bytes = ai.reg_width
         self.mask = (1 << (self.width_bytes * 8)) - 1
         self._cache: dict[bytes, GadgetEffect] = {}
         self._disk_cache = disk_cache
-        self._subreg_map = _build_x86_subreg_map(ai.bits) if ai.cs_arch == cs.CS_ARCH_X86 else {}
+        self._subreg_map = (
+            _build_x86_subreg_map(ai.bits) if ai.cs_arch == cs.CS_ARCH_X86 else {}
+        )
         self.mu = uc.Uc(ai.uc_arch, ai.uc_mode)
         self._map_image()
         self._map_scratch()
@@ -147,14 +178,21 @@ class SemanticEngine:
                 continue  # already mapped (overlapping segments)
             pad = seg.vaddr - base
             buf = bytearray(size)
-            buf[pad:pad + seg.size] = seg.data
+            buf[pad : pad + seg.size] = seg.data
             self.mu.mem_write(base, bytes(buf))
 
     def _pick_free_region(self, size: int) -> int:
-        candidates = [0x0000_7A00_0000_0000, 0x0000_6A00_0000_0000, 0x0000_5A00_0000_0000,
-                      0x2000_0000, 0x6000_0000]
-        occupied = [(_align_down(s.vaddr, 0x1000), (s.vaddr + s.size + 0xFFF) & ~0xFFF)
-                    for s in self.img.segments]
+        candidates = [
+            0x0000_7A00_0000_0000,
+            0x0000_6A00_0000_0000,
+            0x0000_5A00_0000_0000,
+            0x2000_0000,
+            0x6000_0000,
+        ]
+        occupied = [
+            (_align_down(s.vaddr, 0x1000), (s.vaddr + s.size + 0xFFF) & ~0xFFF)
+            for s in self.img.segments
+        ]
         for c in candidates:
             if all(c + size <= lo or c >= hi for lo, hi in occupied):
                 return c
@@ -175,10 +213,14 @@ class SemanticEngine:
         self.mu.mem_write(self.scratch_base, _fill_pattern(scratch_size))
 
     def _lane(self, index: int) -> int:
-        return self.scratch_base + (index % MAX_SCRATCH_LANES) * SCRATCH_LANE_SIZE + SCRATCH_LANE_SIZE // 2
+        return (
+            self.scratch_base
+            + (index % MAX_SCRATCH_LANES) * SCRATCH_LANE_SIZE
+            + SCRATCH_LANE_SIZE // 2
+        )
 
     # ---- register role classification --------------------------------
-    def _reg_name(self, insn, reg_id) -> Optional[str]:
+    def _reg_name(self, insn, reg_id) -> str | None:
         try:
             name = insn.reg_name(reg_id)
         except Exception:
@@ -238,8 +280,15 @@ class SemanticEngine:
         v = _K_DATA_BASIS_TEMPLATE[variant % len(_K_DATA_BASIS_TEMPLATE)]
         return self.mask if v == "ALLONES" else (v & self.mask)
 
-    def _run_trial(self, gadget: Gadget, roles: dict[str, str], lane_of: dict[str, int],
-                    varied_reg: Optional[str], variant: int, n_trials: int):
+    def _run_trial(
+        self,
+        gadget: Gadget,
+        roles: dict[str, str],
+        lane_of: dict[str, int],
+        varied_reg: str | None,
+        variant: int,
+        n_trials: int,
+    ):
         ai = self.ai
         for reg, role in roles.items():
             if reg == varied_reg:
@@ -251,11 +300,14 @@ class SemanticEngine:
             if const is not None:
                 self.mu.reg_write(const, val & self.mask)
 
-        sp_val = self._basis_for("sp", 0, 1) if varied_reg != ai.sp_reg else \
-            self._basis_for("sp", 0, variant)
+        sp_val = (
+            self._basis_for("sp", 0, 1)
+            if varied_reg != ai.sp_reg
+            else self._basis_for("sp", 0, variant)
+        )
         self.mu.reg_write(ai.uc_reg_const[ai.sp_reg], sp_val)
 
-        writes: list[tuple[int, int, int]] = []   # (addr, size, value)
+        writes: list[tuple[int, int, int]] = []  # (addr, size, value)
         reads: list[tuple[int, int, int]] = []
 
         byteorder = "little" if self.img.little_endian else "big"
@@ -297,8 +349,12 @@ class SemanticEngine:
         try:
             self.mu.emu_start(gadget.address, 0, timeout=200_000)
         except uc.UcError as e:
-            benign = e.errno in (uc.UC_ERR_FETCH_UNMAPPED, uc.UC_ERR_FETCH_PROT,
-                                  uc.UC_ERR_INSN_INVALID, uc.UC_ERR_EXCEPTION)
+            benign = e.errno in (
+                uc.UC_ERR_FETCH_UNMAPPED,
+                uc.UC_ERR_FETCH_PROT,
+                uc.UC_ERR_INSN_INVALID,
+                uc.UC_ERR_EXCEPTION,
+            )
             ok = benign and executed[0] >= budget
         finally:
             self.mu.hook_del(h1)
@@ -315,7 +371,9 @@ class SemanticEngine:
 
     # ---- affine fitting -------------------------------------------------
     @staticmethod
-    def _fit(points: list[tuple[int, int]], width_bytes: int) -> Optional[tuple[EKind, int, int]]:
+    def _fit(
+        points: list[tuple[int, int]], width_bytes: int
+    ) -> tuple[EKind, int, int] | None:
         """points = [(src_val, out_val), ...] -> (kind, k, c) or None."""
         if len(points) < 2:
             return None
@@ -359,7 +417,9 @@ class SemanticEngine:
                 self._cache[gadget.raw] = cached
                 return cached
 
-        read_regs, written_regs, pointer_regs, write_width = self._classify_gadget_regs(gadget)
+        read_regs, written_regs, pointer_regs, write_width = self._classify_gadget_regs(
+            gadget
+        )
         roles = {}
         lane_of = {}
         li = 0
@@ -382,12 +442,17 @@ class SemanticEngine:
 
         # baseline trial (variant=1 for everyone) establishes fault-free sanity
         base_ok, base_finals, base_writes, base_reads = self._run_trial(
-            gadget, roles, lane_of, varied_reg=None, variant=1, n_trials=1)
+            gadget, roles, lane_of, varied_reg=None, variant=1, n_trials=1
+        )
 
         if not base_ok:
-            return self._store(gadget, GadgetEffect(ok=False, notes="baseline emulation faulted"))
+            return self._store(
+                gadget, GadgetEffect(ok=False, notes="baseline emulation faulted")
+            )
 
-        initial_sp = self._basis_for("sp", 0, 1)  # baseline trials use variant=1 for fixed regs
+        initial_sp = self._basis_for(
+            "sp", 0, 1
+        )  # baseline trials use variant=1 for fixed regs
         sp_delta = base_finals.get(self.ai.sp_reg, 0) - initial_sp
 
         per_candidate_trials: dict[str, list[tuple[int, dict, list, list]]] = {}
@@ -396,7 +461,13 @@ class SemanticEngine:
             for variant in range(n_variants):
                 src_val = self._basis_for(roles[cand], lane_of.get(cand, 0), variant)
                 ok, finals, writes, reads = self._run_trial(
-                    gadget, roles, lane_of, varied_reg=cand, variant=variant, n_trials=n_variants)
+                    gadget,
+                    roles,
+                    lane_of,
+                    varied_reg=cand,
+                    variant=variant,
+                    n_trials=n_variants,
+                )
                 if ok:
                     trials.append((src_val, finals, writes, reads))
             per_candidate_trials[cand] = trials
@@ -404,8 +475,8 @@ class SemanticEngine:
         reg_effects: dict[str, RegEffect] = {}
         for dst in written_regs:
             dst_width = write_width.get(dst, self.width_bytes)
-            const_fallback: Optional[RegEffect] = None
-            chosen: Optional[RegEffect] = None
+            const_fallback: RegEffect | None = None
+            chosen: RegEffect | None = None
             for cand in candidates:
                 trials = per_candidate_trials.get(cand, [])
                 if len(trials) < 3:
@@ -415,15 +486,22 @@ class SemanticEngine:
                 # get compared against stale upper bits from a *different*
                 # instruction earlier in the trial's final-state snapshot.
                 dst_mask = (1 << (dst_width * 8)) - 1
-                pts = [(s, f.get(dst, 0) & dst_mask) for s, f, _, _ in trials if dst in f]
+                pts = [
+                    (s, f.get(dst, 0) & dst_mask) for s, f, _, _ in trials if dst in f
+                ]
                 if len(pts) < 3:
                     continue
                 fit = self._fit(pts, dst_width)
                 if fit is None:
                     continue
                 kind, k, c = fit
-                eff = RegEffect(kind=kind, src=(None if kind == EKind.CONST else cand),
-                                 k=k, c=c, size=dst_width)
+                eff = RegEffect(
+                    kind=kind,
+                    src=(None if kind == EKind.CONST else cand),
+                    k=k,
+                    c=c,
+                    size=dst_width,
+                )
                 if kind == EKind.CONST:
                     if const_fallback is None:
                         const_fallback = eff
@@ -454,18 +532,29 @@ class SemanticEngine:
                     fit_a = self._fit(addr_pts, self.width_bytes)
                     if fit_a and fit_a[0] != EKind.CONST:
                         k, c = fit_a[1], fit_a[2]
-                        addr_eff = RegEffect(kind=fit_a[0], src=cand, k=k, c=c, size=self.width_bytes)
+                        addr_eff = RegEffect(
+                            kind=fit_a[0], src=cand, k=k, c=c, size=self.width_bytes
+                        )
                 if val_eff is None:
                     fit_v = self._fit(val_pts, self.width_bytes)
                     if fit_v:
                         k, c = fit_v[1], fit_v[2]
-                        val_eff = RegEffect(kind=fit_v[0], src=(None if fit_v[0] == EKind.CONST else cand),
-                                             k=k, c=c, size=size)
+                        val_eff = RegEffect(
+                            kind=fit_v[0],
+                            src=(None if fit_v[0] == EKind.CONST else cand),
+                            k=k,
+                            c=c,
+                            size=size,
+                        )
             if addr_eff is None:
-                addr_eff = RegEffect(kind=EKind.CONST, c=base_writes[wi][0], size=self.width_bytes)
+                addr_eff = RegEffect(
+                    kind=EKind.CONST, c=base_writes[wi][0], size=self.width_bytes
+                )
             if val_eff is None:
                 val_eff = RegEffect(kind=EKind.CONST, c=base_writes[wi][2], size=size)
-            mem_writes.append(MemEffect(addr=addr_eff, value=val_eff, size=size, is_write=True))
+            mem_writes.append(
+                MemEffect(addr=addr_eff, value=val_eff, size=size, is_write=True)
+            )
 
         # memory reads -> also check for LOAD-into-register (dst == value read)
         n_base_reads = len(base_reads)
@@ -481,11 +570,21 @@ class SemanticEngine:
                 addr_pts = [(s, r[ri][0]) for s, r in usable]
                 fit_a = self._fit(addr_pts, self.width_bytes)
                 if fit_a and fit_a[0] != EKind.CONST:
-                    addr_eff = RegEffect(kind=fit_a[0], src=cand, k=fit_a[1], c=fit_a[2], size=self.width_bytes)
+                    addr_eff = RegEffect(
+                        kind=fit_a[0],
+                        src=cand,
+                        k=fit_a[1],
+                        c=fit_a[2],
+                        size=self.width_bytes,
+                    )
                     break
             if addr_eff is None:
-                addr_eff = RegEffect(kind=EKind.CONST, c=base_reads[ri][0], size=self.width_bytes)
-            mem_reads.append(MemEffect(addr=addr_eff, value=None, size=size, is_write=False))
+                addr_eff = RegEffect(
+                    kind=EKind.CONST, c=base_reads[ri][0], size=self.width_bytes
+                )
+            mem_reads.append(
+                MemEffect(addr=addr_eff, value=None, size=size, is_write=False)
+            )
             # does some destination register simply equal this read's value in every trial?
             for cand in candidates:
                 trials = per_candidate_trials.get(cand, [])
@@ -493,12 +592,25 @@ class SemanticEngine:
                 if len(usable) < 3:
                     continue
                 for dst in list(written_regs):
-                    if reg_effects.get(dst) is not None and reg_effects[dst].kind == EKind.LOAD:
+                    if (
+                        reg_effects.get(dst) is not None
+                        and reg_effects[dst].kind == EKind.LOAD
+                    ):
                         continue  # first matching read wins; don't let a later one clobber it
                     if all(dst in f and f[dst] == r[ri][2] for f, r in usable):
-                        reg_effects[dst] = RegEffect(kind=EKind.LOAD, src=addr_eff.src or "const",
-                                                      k=addr_eff.k, c=addr_eff.c, size=size)
+                        reg_effects[dst] = RegEffect(
+                            kind=EKind.LOAD,
+                            src=addr_eff.src or "const",
+                            k=addr_eff.k,
+                            c=addr_eff.c,
+                            size=size,
+                        )
 
-        eff = GadgetEffect(reg_effects=reg_effects, mem_writes=mem_writes, mem_reads=mem_reads,
-                            sp_delta=sp_delta, ok=True)
+        eff = GadgetEffect(
+            reg_effects=reg_effects,
+            mem_writes=mem_writes,
+            mem_reads=mem_reads,
+            sp_delta=sp_delta,
+            ok=True,
+        )
         return self._store(gadget, eff)

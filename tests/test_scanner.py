@@ -7,8 +7,14 @@ def test_no_conditional_jumps_in_gadget_bodies(ntdll_path):
     opts = scanner.ScanOptions(max_insns=6)
     gadgets = scanner.scan_image(img, opts)
     assert len(gadgets) > 1000
-    bad = [g for g in gadgets if any(
-        insn.mnemonic.startswith("j") and insn.mnemonic != "jmp" for insn in g.insns[:-1])]
+    bad = [
+        g
+        for g in gadgets
+        if any(
+            insn.mnemonic.startswith("j") and insn.mnemonic != "jmp"
+            for insn in g.insns[:-1]
+        )
+    ]
     assert bad == [], f"found {len(bad)} gadgets with a mid-body conditional jump"
 
 

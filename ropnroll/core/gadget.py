@@ -1,7 +1,8 @@
 """Core gadget representation."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 
 
@@ -21,10 +22,10 @@ class Terminator(Enum):
 class Gadget:
     address: int
     raw: bytes
-    text: str                       # "pop rdi ; ret"
-    insns: list                     # list of capstone CsInsn (kept for semantic lifting)
+    text: str  # "pop rdi ; ret"
+    insns: list  # list of capstone CsInsn (kept for semantic lifting)
     terminator: Terminator
-    module: str = ""                # which Image/module this came from (for multi-binary pools)
+    module: str = ""  # which Image/module this came from (for multi-binary pools)
 
     @property
     def size(self) -> int:

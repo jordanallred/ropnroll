@@ -43,7 +43,9 @@ def test_call_windows_export_with_ms64_args(ntdll_path):
     target_addr = img.symbols["RtlComputeCrc32"]
     res = build_call(pool, target=target_addr, args=[0, 0x1337])
     assert res.ok
-    rep = verify_chain(img, res.chain, final_target=target_addr, goal_regs={"rcx": 0, "rdx": 0x1337})
+    rep = verify_chain(
+        img, res.chain, final_target=target_addr, goal_regs={"rcx": 0, "rdx": 0x1337}
+    )
     assert rep.ok, rep.fault
 
 
@@ -58,7 +60,9 @@ def test_stack_pivot_gadgets_rejected_by_general_solver(ntdll_path):
     used_addrs = {w.value for w in res.chain.words}
     for g in pool.all():
         if g.text.startswith("leave") and g.address in used_addrs:
-            raise AssertionError("a leave-based pivot gadget was used as a plain register setter")
+            raise AssertionError(
+                "a leave-based pivot gadget was used as a plain register setter"
+            )
 
 
 def test_call_chain_alignment_pad(ntdll_path):
@@ -77,10 +81,13 @@ def test_call_chain_alignment_pad(ntdll_path):
     # by one word" misalignment, not an arbitrary byte-level skew -- that
     # never occurs on a real stack.
     for padding in (0, 8, 40, 72, 104):
-        res = build_call(pool, target=target_addr, args=[0x1000], bytes_before_chain=padding)
+        res = build_call(
+            pool, target=target_addr, args=[0x1000], bytes_before_chain=padding
+        )
         assert res.ok
-        target_word_index = next(i for i, w in enumerate(res.chain.words)
-                                  if w.value == target_addr)
+        target_word_index = next(
+            i for i, w in enumerate(res.chain.words) if w.value == target_addr
+        )
         target_offset = padding + target_word_index * 8
         assert target_offset % 16 == 0, (padding, target_offset)
 
@@ -108,6 +115,47 @@ def test_multihop_indirection_forced(tmp_path):
     assert rep.final_regs.get("rdi") == 0x1337
 
 
+def test_build_call_warns_on_cet_shadow_stack(tmp_path):
+    """CET shadow stack breaks return-based ROP outright; build_call should
+    say so instead of silently handing back a chain that will fault on its
+    first `ret` -- mirroring find_dispatchers' existing CFG/CET steering for
+    JOP (solve/jop.py)."""
+    ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
+    enc, _ = ks.asm("pop rcx ; ret")
+    path = str(tmp_path / "cet.exe")
+    write_minimal_pe(path, "x86_64", bytes(enc), base=0x400000)
+    pool, img = _pool(path)
+
+    res = build_call(pool, target=0x402000, args=[0x1337])
+    assert res.ok
+    assert res.chain.warnings == []  # no img given -- nothing to warn about
+
+    res = build_call(pool, target=0x402000, args=[0x1337], img=img)
+    assert res.ok
+    assert res.chain.warnings == []  # img given but CET not enabled
+
+    img.mitigations["cet"] = True
+    res = build_call(pool, target=0x402000, args=[0x1337], img=img)
+    assert res.ok
+    assert any("CET" in w for w in res.chain.warnings)
+
+
+def test_build_call_cdecl_warns_on_cet_shadow_stack(tmp_path):
+    """Same warning must reach the x86 cdecl/stdcall branch of build_call
+    too -- no register-passed args, so it's a separate code path from the
+    MS x64 one above."""
+    ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_32)
+    enc, _ = ks.asm("ret")
+    path = str(tmp_path / "cet32.exe")
+    write_minimal_pe(path, "x86", bytes(enc), base=0x400000)
+    pool, img = _pool(path)
+
+    img.mitigations["cet"] = True
+    res = build_call(pool, target=0x402000, args=[1, 2], img=img)
+    assert res.ok
+    assert any("CET" in w for w in res.chain.warnings)
+
+
 def _write_beyond_old_breadth_binary(path):
     """Synthetic gadget set where the *only* useful transform for rdi is
     ranked 16th among gadgets that textually touch rdi -- 13 `cmp rdi, X`
@@ -125,7 +173,21 @@ def _write_beyond_old_breadth_binary(path):
         enc, _ = ks.asm(s)
         return bytes(enc)
 
-    decoy_regs = ["rax", "rbx", "rcx", "rdx", "rsi", "rbp", "r8", "r9", "r10", "r11", "r13", "r14", "r15"]
+    decoy_regs = [
+        "rax",
+        "rbx",
+        "rcx",
+        "rdx",
+        "rsi",
+        "rbp",
+        "r8",
+        "r9",
+        "r10",
+        "r11",
+        "r13",
+        "r14",
+        "r15",
+    ]
     code = b"".join(asm(f"cmp rdi, {r} ; ret") for r in decoy_regs)
     code += asm("cmp rax, rdi ; ret") + asm("cmp rbx, rdi ; ret")
     code += asm("mov rdi, r12 ; ret")
@@ -182,13 +244,19 @@ def test_indirect_solver_is_deterministic_across_hash_seeds(tmp_path):
     _write_beyond_old_breadth_binary(path)
 
     import pathlib
+
     repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
     script = _DETERMINISM_SCRIPT.format(repo_root=repo_root)
 
     outputs = []
     for seed in ("0", "1", "42"):
         env = dict(os.environ, PYTHONHASHSEED=seed)
-        result = subprocess.run([sys.executable, "-c", script, path],
-                                 capture_output=True, text=True, env=env, check=True)
+        result = subprocess.run(
+            [sys.executable, "-c", script, path],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
         outputs.append(result.stdout.strip())
     assert len(set(outputs)) == 1, f"solver result varies by PYTHONHASHSEED: {outputs}"

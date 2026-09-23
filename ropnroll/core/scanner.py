@@ -13,12 +13,13 @@ gadget *does*, only that it is a legally decodable instruction stream
 ending in something that returns/jumps/syscalls. Semantic understanding
 is added lazily on top by ropnroll.semantics.
 """
+
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from typing import Iterator, Optional
 
 import capstone as cs
 
@@ -30,17 +31,37 @@ from .loader import Image, Segment
 _BAD_MNEMONICS = {
     # instructions we refuse to let appear *inside* a gadget body (privileged,
     # or themselves would have terminated an earlier/shorter gadget already).
-    "hlt", "in", "out", "insb", "insw", "insd", "outsb", "outsw", "outsd",
-    "iret", "iretd", "iretq", "ud2", "ud2b", "vmcall", "vmlaunch", "vmresume",
-    "vmxoff", "cli", "sti", "lock",
+    "hlt",
+    "in",
+    "out",
+    "insb",
+    "insw",
+    "insd",
+    "outsb",
+    "outsw",
+    "outsd",
+    "iret",
+    "iretd",
+    "iretq",
+    "ud2",
+    "ud2b",
+    "vmcall",
+    "vmlaunch",
+    "vmresume",
+    "vmxoff",
+    "cli",
+    "sti",
+    "lock",
 }
 
 _JUMP_MNEM = {"jmp"}
 _CALL_MNEM = {"call"}
-_COND_JUMP_PREFIXES = ("j",)  # jcc other than jmp - excluded from "clean" bodies by default
+_COND_JUMP_PREFIXES = (
+    "j",
+)  # jcc other than jmp - excluded from "clean" bodies by default
 
 
-def _classify_x86(insn) -> Optional[Terminator]:
+def _classify_x86(insn) -> Terminator | None:
     m = insn.mnemonic
     if m == "ret" or m == "retf":
         return Terminator.RET if not insn.operands else Terminator.RET_IMM
@@ -48,8 +69,12 @@ def _classify_x86(insn) -> Optional[Terminator]:
         return Terminator.SYSCALL
     if m == "int3":
         return None
-    if m == "int" and insn.operands and insn.operands[0].type == cs.x86.X86_OP_IMM \
-            and insn.operands[0].imm == 0x80:
+    if (
+        m == "int"
+        and insn.operands
+        and insn.operands[0].type == cs.x86.X86_OP_IMM
+        and insn.operands[0].imm == 0x80
+    ):
         return Terminator.INT80
     if m in _JUMP_MNEM and insn.operands:
         op = insn.operands[0]
@@ -66,11 +91,15 @@ def _classify_x86(insn) -> Optional[Terminator]:
     return None
 
 
-def _classify_arm64(insn) -> Optional[Terminator]:
+def _classify_arm64(insn) -> Terminator | None:
     m = insn.mnemonic
     if m == "ret":
         return Terminator.RET
-    if m in ("br", "blr") and insn.operands and insn.operands[0].type == cs.arm64.ARM64_OP_REG:
+    if (
+        m in ("br", "blr")
+        and insn.operands
+        and insn.operands[0].type == cs.arm64.ARM64_OP_REG
+    ):
         return Terminator.CALL_REG if m == "blr" else Terminator.JMP_REG
     if m == "svc":
         return Terminator.SYSCALL
@@ -120,21 +149,26 @@ def _make_disassembler(ai: ArchInfo) -> cs.Cs:
 
 @dataclass
 class ScanOptions:
-    max_bytes: Optional[int] = None
-    max_insns: Optional[int] = None
+    max_bytes: int | None = None
+    max_insns: int | None = None
     rop: bool = True
     jop: bool = True
     sys: bool = True
     allow_cond_jump_terminators: bool = False
     bad_bytes: bytes = b""
     only_executable_segments: bool = True
-    jobs: Optional[int] = None  # None = auto-detect; 1 = force serial
+    jobs: int | None = None  # None = auto-detect; 1 = force serial
 
 
 def _wanted(term: Terminator, opts: ScanOptions) -> bool:
     if term in (Terminator.RET, Terminator.RET_IMM):
         return opts.rop
-    if term in (Terminator.JMP_REG, Terminator.CALL_REG, Terminator.JMP_MEM, Terminator.CALL_MEM):
+    if term in (
+        Terminator.JMP_REG,
+        Terminator.CALL_REG,
+        Terminator.JMP_MEM,
+        Terminator.CALL_MEM,
+    ):
         return opts.jop
     if term in (Terminator.SYSCALL, Terminator.INT80):
         return opts.sys
@@ -147,7 +181,9 @@ def _has_bad_bytes(raw: bytes, bad: bytes) -> bool:
     return any(b in raw for b in bad)
 
 
-def _find_x86_terminator_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts: ScanOptions) -> list[int]:
+def _find_x86_terminator_offsets(
+    data: bytes, seg_vaddr: int, ai: ArchInfo, opts: ScanOptions
+) -> list[int]:
     """Pass 1 (cheap, linear, run once regardless of worker count): every
     'naturally aligned' terminator, plus every raw 0xc3 byte occurrence --
     the latter is what actually finds the 'unintended' gadgets that make
@@ -159,7 +195,7 @@ def _find_x86_terminator_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts
     off = 0
     while off < n:
         try:
-            insn = next(md.disasm(data[off:off + 16], seg_vaddr + off, count=1))
+            insn = next(md.disasm(data[off : off + 16], seg_vaddr + off, count=1))
         except StopIteration:
             off += 1
             continue
@@ -176,9 +212,15 @@ def _find_x86_terminator_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts
     return sorted(set(term_offsets))
 
 
-def _scan_x86_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts: ScanOptions,
-                       term_offsets: list[int], max_bytes: int,
-                       max_insns: int) -> list[tuple[int, bytes, str]]:
+def _scan_x86_offsets(
+    data: bytes,
+    seg_vaddr: int,
+    ai: ArchInfo,
+    opts: ScanOptions,
+    term_offsets: list[int],
+    max_bytes: int,
+    max_insns: int,
+) -> list[tuple[int, bytes, str]]:
     """Core gadget extraction for a given list of candidate terminator
     offsets -- module-level and picklable-input-only so it can run either
     inline (serial) or as a ProcessPoolExecutor worker (parallel) unchanged.
@@ -195,13 +237,13 @@ def _scan_x86_offsets(data: bytes, seg_vaddr: int, ai: ArchInfo, opts: ScanOptio
     """
     md = _make_disassembler(ai)
     classify = _CLASSIFIERS[ai.cs_arch]
-    decode: dict[int, Optional[tuple]] = {}
+    decode: dict[int, tuple | None] = {}
 
     def decode_at(o: int):
         if o in decode:
             return decode[o]
         try:
-            insn = next(md.disasm(data[o:o + 16], seg_vaddr + o, count=1))
+            insn = next(md.disasm(data[o : o + 16], seg_vaddr + o, count=1))
         except StopIteration:
             decode[o] = None
             return None
@@ -286,10 +328,19 @@ def _scan_key(opts: ScanOptions) -> str:
     which gadgets a scan finds -- `jobs` is deliberately excluded since the
     result is deterministic regardless of worker count (see
     _scan_x86_offsets's docstring)."""
-    return "|".join(str(x) for x in (
-        opts.max_bytes, opts.max_insns, opts.rop, opts.jop, opts.sys,
-        opts.allow_cond_jump_terminators, opts.bad_bytes.hex(), opts.only_executable_segments,
-    ))
+    return "|".join(
+        str(x)
+        for x in (
+            opts.max_bytes,
+            opts.max_insns,
+            opts.rop,
+            opts.jop,
+            opts.sys,
+            opts.allow_cond_jump_terminators,
+            opts.bad_bytes.hex(),
+            opts.only_executable_segments,
+        )
+    )
 
 
 _PARALLEL_MIN_BYTES = 64 * 1024
@@ -303,11 +354,18 @@ def _choose_workers(opts: ScanOptions, data_len: int, n_terms: int) -> int:
     if data_len < _PARALLEL_MIN_BYTES:
         return 1
     requested = opts.jobs or (os.cpu_count() or 1)
-    workers = max(1, min(requested, _PARALLEL_MAX_WORKERS, n_terms // _PARALLEL_MIN_TERMS_PER_WORKER))
+    workers = max(
+        1,
+        min(
+            requested, _PARALLEL_MAX_WORKERS, n_terms // _PARALLEL_MIN_TERMS_PER_WORKER
+        ),
+    )
     return workers
 
 
-def _rebuild_gadgets(results: list[tuple[int, bytes, str]], ai: ArchInfo, module: str) -> list[Gadget]:
+def _rebuild_gadgets(
+    results: list[tuple[int, bytes, str]], ai: ArchInfo, module: str
+) -> list[Gadget]:
     """Turn (address, raw, terminator_name) tuples -- deduped by raw bytes
     across however many workers produced them -- into real Gadget objects.
     Each unique raw byte sequence is already confirmed to disassemble
@@ -327,13 +385,22 @@ def _rebuild_gadgets(results: list[tuple[int, bytes, str]], ai: ArchInfo, module
     for raw, (addr, term_name) in by_raw.items():
         insns = list(md.disasm(raw, addr))
         text = " ; ".join(f"{i.mnemonic} {i.op_str}".strip() for i in insns)
-        gadgets.append(Gadget(address=addr, raw=raw, text=text, insns=insns,
-                               terminator=Terminator[term_name], module=module))
+        gadgets.append(
+            Gadget(
+                address=addr,
+                raw=raw,
+                text=text,
+                insns=insns,
+                terminator=Terminator[term_name],
+                module=module,
+            )
+        )
     return gadgets
 
 
-def _rebuild_from_cache(entries: list[tuple[int, bytes, str]], ai: ArchInfo, module: str,
-                         image_base: int) -> list[Gadget]:
+def _rebuild_from_cache(
+    entries: list[tuple[int, bytes, str]], ai: ArchInfo, module: str, image_base: int
+) -> list[Gadget]:
     """Mirror of _rebuild_gadgets for cache hits: each entry is already a
     confirmed-clean (rva, raw, terminator_name) triple, so this is one cheap
     forward decode per gadget to regenerate `insns`/`text`, not a search."""
@@ -343,12 +410,22 @@ def _rebuild_from_cache(entries: list[tuple[int, bytes, str]], ai: ArchInfo, mod
         addr = image_base + rva
         insns = list(md.disasm(raw, addr))
         text = " ; ".join(f"{i.mnemonic} {i.op_str}".strip() for i in insns)
-        gadgets.append(Gadget(address=addr, raw=raw, text=text, insns=insns,
-                               terminator=Terminator[term_name], module=module))
+        gadgets.append(
+            Gadget(
+                address=addr,
+                raw=raw,
+                text=text,
+                insns=insns,
+                terminator=Terminator[term_name],
+                module=module,
+            )
+        )
     return gadgets
 
 
-def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str) -> list[Gadget]:
+def _scan_segment_x86(
+    seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str
+) -> list[Gadget]:
     data = seg.data
     max_bytes = opts.max_bytes or ai.max_gadget_bytes
     max_insns = opts.max_insns or ai.max_gadget_insns
@@ -357,20 +434,36 @@ def _scan_segment_x86(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str
     workers = _choose_workers(opts, len(data), len(term_offsets))
 
     if workers == 1:
-        results = _scan_x86_offsets(data, seg.vaddr, ai, opts, term_offsets, max_bytes, max_insns)
+        results = _scan_x86_offsets(
+            data, seg.vaddr, ai, opts, term_offsets, max_bytes, max_insns
+        )
     else:
         chunks = [term_offsets[i::workers] for i in range(workers)]
         results = []
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(_scan_x86_offsets, data, seg.vaddr, ai, opts, c, max_bytes, max_insns)
-                    for c in chunks if c]
+            futs = [
+                ex.submit(
+                    _scan_x86_offsets,
+                    data,
+                    seg.vaddr,
+                    ai,
+                    opts,
+                    c,
+                    max_bytes,
+                    max_insns,
+                )
+                for c in chunks
+                if c
+            ]
             for f in futs:
                 results.extend(f.result())
 
     return _rebuild_gadgets(results, ai, module)
 
 
-def _scan_segment_fixed_width(seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str) -> Iterator[Gadget]:
+def _scan_segment_fixed_width(
+    seg: Segment, ai: ArchInfo, opts: ScanOptions, module: str
+) -> Iterator[Gadget]:
     """ARM64: every instruction is exactly `insn_alignment` bytes, so this
     is much simpler than the x86 byte-granular walk -- candidate gadget
     starts only need to be tried at aligned offsets."""
@@ -381,18 +474,21 @@ def _scan_segment_fixed_width(seg: Segment, ai: ArchInfo, opts: ScanOptions, mod
     n = len(data)
     max_insns = opts.max_insns or ai.max_gadget_insns
 
-    all_insns: dict[int, "cs.CsInsn"] = {}
+    all_insns: dict[int, cs.CsInsn] = {}
     off = 0
     while off + step <= n:
         try:
-            insn = next(md.disasm(data[off:off + step], seg.vaddr + off, count=1))
+            insn = next(md.disasm(data[off : off + step], seg.vaddr + off, count=1))
             all_insns[off] = insn
         except StopIteration:
             pass
         off += step
 
-    term_offs = [o for o, ins in all_insns.items()
-                 if classify(ins) is not None and _wanted(classify(ins), opts)]
+    term_offs = [
+        o
+        for o, ins in all_insns.items()
+        if classify(ins) is not None and _wanted(classify(ins), opts)
+    ]
 
     seen_bytes: set[bytes] = set()
     for end in term_offs:
@@ -430,15 +526,27 @@ def _scan_segment_fixed_width(seg: Segment, ai: ArchInfo, opts: ScanOptions, mod
                 continue
             seen_bytes.add(raw)
             text = " ; ".join(f"{i.mnemonic} {i.op_str}".strip() for i in insns)
-            yield Gadget(address=seg.vaddr + start, raw=raw, text=text, insns=insns,
-                         terminator=t, module=module)
+            yield Gadget(
+                address=seg.vaddr + start,
+                raw=raw,
+                text=text,
+                insns=insns,
+                terminator=t,
+                module=module,
+            )
 
 
-def scan_image(img: Image, opts: Optional[ScanOptions] = None, use_cache: bool = True) -> list[Gadget]:
+def scan_image(
+    img: Image, opts: ScanOptions | None = None, use_cache: bool = True
+) -> list[Gadget]:
     opts = opts or ScanOptions()
     ai = get_archinfo(img.arch, img.little_endian)
 
-    cache = GadgetScanCache(img.sha256, _scan_key(opts), SCANNER_VERSION) if use_cache else None
+    cache = (
+        GadgetScanCache(img.sha256, _scan_key(opts), SCANNER_VERSION)
+        if use_cache
+        else None
+    )
     if cache is not None:
         cached = cache.get()
         if cached is not None:
@@ -454,6 +562,8 @@ def scan_image(img: Image, opts: Optional[ScanOptions] = None, use_cache: bool =
     gadgets.sort(key=lambda g: (g.address, g.size))
 
     if cache is not None:
-        cache.put([(g.address - img.image_base, g.raw, g.terminator.name) for g in gadgets])
+        cache.put(
+            [(g.address - img.image_base, g.raw, g.terminator.name) for g in gadgets]
+        )
 
     return gadgets

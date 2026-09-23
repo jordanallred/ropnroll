@@ -3,7 +3,7 @@ Persistent on-disk cache for semantic gadget effects.
 
 Computing a GadgetEffect costs several real Unicorn emulation runs (see
 semantics/engine.py), and the realistic workflow -- building an exploit -- means
-running `search`/`call`/`syscall` repeatedly against the *same* binary or libc.
+running `search`/`call` repeatedly against the *same* binary or DLL.
 Without persistence, every single invocation pays that cost again from zero.
 
 Cache files are keyed by the target binary's content hash (Image.sha256), so a
@@ -87,5 +87,59 @@ class EffectDiskCache:
                 json.dump(data, f)
             os.replace(tmp, self.path)
             self._dirty = False
+        except OSError:
+            pass  # a failed cache write should never break the actual command
+
+
+class GadgetScanCache:
+    """One JSON file per binary (keyed by content hash), holding the full
+    gadget list produced by a scan with a specific ScanOptions configuration.
+
+    Scanning (scanner.scan_image) is the syntactic disassembly pass that
+    finds every gadget in a module -- for a large module (a Windows system
+    DLL routinely runs 500KB-1MB+) this is the dominant cost of a command,
+    often an order of magnitude more than everything else combined, and
+    unlike per-gadget semantic effects (EffectDiskCache above) it was
+    previously redone from scratch on every single invocation.
+
+    Addresses are stored as RVAs (offset from img.image_base) rather than
+    absolute addresses: Image.rebase() shifts image_base and every segment
+    vaddr by the same delta, so `address - image_base` is invariant across
+    rebasing and a cached scan stays valid regardless of what --base
+    override (if any) was in effect when it was produced or when it is
+    read back.
+
+    A version stamp plus a scan_key (the ScanOptions fields that actually
+    affect which gadgets are found) guard against silently serving stale or
+    mismatched results -- either one changing treats the cache as cold.
+    """
+
+    def __init__(self, sha256: str, scan_key: str, version: int, root: Optional[Path] = None):
+        self.path = (root or cache_dir()) / "scans" / f"{sha256}.json"
+        self.scan_key = scan_key
+        self.version = version
+
+    def get(self) -> Optional[list[tuple[int, bytes, str]]]:
+        try:
+            with open(self.path, "r") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if data.get("version") != self.version or data.get("scan_key") != self.scan_key:
+            return None  # stale schema/scanner version or different scan options -- cold cache
+        try:
+            return [(rva, bytes.fromhex(raw_hex), term) for rva, raw_hex, term in data["gadgets"]]
+        except (KeyError, ValueError, TypeError):
+            return None  # corrupt cache -- treat as cold rather than fail the scan
+
+    def put(self, gadgets: list[tuple[int, bytes, str]]):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            data = {"version": self.version, "scan_key": self.scan_key,
+                    "gadgets": [[rva, raw.hex(), term] for rva, raw, term in gadgets]}
+            tmp = self.path.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.path)
         except OSError:
             pass  # a failed cache write should never break the actual command

@@ -1,63 +1,90 @@
-"""Minimal hand-rolled ELF writer for test fixtures.
+"""Minimal hand-rolled PE writer for test fixtures.
 
-No cross-compiler toolchains are available in this environment for
-ARM/MIPS/RISC-V/PowerPC, so test binaries for those architectures are
-built by assembling real machine code with keystone and wrapping it in
-the smallest ELF LIEF will parse correctly -- a real file on disk, read
-back through the same loader.load() path everything else uses, not a
-mocked-up Image.
+No MSVC/MinGW toolchain invocation is wanted here for tiny synthetic
+gadget sets (that would mean shipping a compiler dependency just to embed
+a handful of hand-assembled instructions) -- so test binaries built purely
+from raw machine code (via keystone) are wrapped in the smallest PE LIEF
+will parse correctly: a real file on disk, read back through the same
+loader.load() path everything else uses, not a mocked-up Image.
 """
 from __future__ import annotations
 
 import struct
 
-EM = {
-    "x86": 3, "arm": 40, "x86_64": 62, "arm64": 183,
-    "mips": 8, "mips64": 8, "ppc": 20, "ppc64": 21, "riscv32": 243, "riscv64": 243,
-}
+_PE_MACHINE = {"x86": 0x14C, "x86_64": 0x8664, "arm64": 0xAA64}
 
 
-def write_minimal_elf(path: str, arch: str, code: bytes, base: int = 0x400000,
-                       bits: int = 64, little_endian: bool = True, e_flags: int = 0):
-    is64 = bits == 64
-    ei_class = 2 if is64 else 1
-    ei_data = 1 if little_endian else 2
-    e_machine = EM[arch]
-    endian = "<" if little_endian else ">"
+def _align_up(x: int, a: int) -> int:
+    return (x + a - 1) & ~(a - 1)
 
-    ehsize = 64 if is64 else 52
-    phentsize = 56 if is64 else 32
-    phoff = ehsize
-    entry = base + ehsize + phentsize
 
-    e_ident = bytes([0x7F, 0x45, 0x4C, 0x46, ei_class, ei_data, 1, 0]) + bytes(8)
-    if is64:
-        ehdr = e_ident + struct.pack(
-            endian + "HHIQQQIHHHHHH", 2, e_machine, 1, entry, phoff, 0, e_flags,
-            ehsize, phentsize, 1, 0, 0, 0)
-        phdr = struct.pack(endian + "IIQQQQQQ", 1, 5, 0, base, base, 0, 0, 0x1000)
-        # filesz/memsz get patched below once we know the total size
+def write_minimal_pe(path: str, arch: str, code: bytes, base: int = 0x400000) -> int:
+    """Write a single-section, executable-only PE containing exactly
+    `code`, and return its entrypoint's virtual address (base + the
+    section's RVA -- code always starts at the very first byte of the
+    section)."""
+    bits = 32 if arch == "x86" else 64
+    machine = _PE_MACHINE[arch]
+    align = 0x1000  # same value for both SectionAlignment and FileAlignment
+    n_sections = 1
+    opt_size = 240 if bits == 64 else 224
+    unaligned_headers = 64 + 4 + 20 + opt_size + n_sections * 40
+    size_of_headers = _align_up(unaligned_headers, align)
+
+    code_rva = align
+    code_raw_size = _align_up(max(len(code), 1), align)
+    size_of_image = _align_up(code_rva + len(code), align)
+
+    dos_header = b"MZ" + b"\x00" * 58 + struct.pack("<I", 64)  # e_lfanew = 64
+    assert len(dos_header) == 64
+
+    characteristics = 0x0002 | (0x0100 if bits == 32 else 0x0020)  # EXECUTABLE_IMAGE, +32BIT_MACHINE/LARGE_ADDRESS_AWARE
+    file_header = struct.pack("<HHIIIHH", machine, n_sections, 0, 0, 0, opt_size, characteristics)
+
+    subsystem = 3  # IMAGE_SUBSYSTEM_WINDOWS_CUI
+    if bits == 64:
+        opt_header = struct.pack(
+            "<HBBIIIIIQIIHHHHHHIIIIHHQQQQII",
+            0x20B, 0, 0,
+            code_raw_size, 0, 0,
+            code_rva, code_rva,
+            base,
+            align, align,
+            0, 0, 0, 0, 0, 0,
+            0,
+            size_of_image, size_of_headers, 0,
+            subsystem, 0,
+            0x100000, 0x1000, 0x100000, 0x1000,
+            0, 16,
+        )
     else:
-        ehdr = e_ident + struct.pack(
-            endian + "HHIIIIIHHHHHH", 2, e_machine, 1, entry, phoff, 0, e_flags,
-            ehsize, phentsize, 1, 0, 0, 0)
-        phdr = struct.pack(endian + "IIIIIIII", 1, 0, base, base, 0, 0, 5, 0x1000)
+        opt_header = struct.pack(
+            "<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII",
+            0x10B, 0, 0,
+            code_raw_size, 0, 0,
+            code_rva, code_rva, code_rva,
+            base,
+            align, align,
+            0, 0, 0, 0, 0, 0,
+            0,
+            size_of_image, size_of_headers, 0,
+            subsystem, 0,
+            0x100000, 0x1000, 0x100000, 0x1000,
+            0, 16,
+        )
+    opt_header += b"\x00" * (8 * 16)  # 16 empty IMAGE_DATA_DIRECTORY entries
 
-    body = ehdr + phdr + code
-    total = len(body)
-    if is64:
-        # p_offset=0, p_filesz/p_memsz = total (patch the two Q fields at
-        # offsets 32 and 40 within phdr, i.e. absolute offsets ehsize+32/40)
-        body = bytearray(body)
-        struct.pack_into(endian + "Q", body, ehsize + 32, total)
-        struct.pack_into(endian + "Q", body, ehsize + 40, total)
-        body = bytes(body)
-    else:
-        body = bytearray(body)
-        struct.pack_into(endian + "I", body, ehsize + 16, total)  # p_filesz
-        struct.pack_into(endian + "I", body, ehsize + 20, total)  # p_memsz
-        body = bytes(body)
+    name = b".text\x00\x00\x00"
+    section_chars = 0x20 | 0x20000000 | 0x40000000  # CNT_CODE | MEM_EXECUTE | MEM_READ
+    section_header = struct.pack(
+        "<8sIIIIIIHHI", name, len(code), code_rva, code_raw_size, size_of_headers,
+        0, 0, 0, 0, section_chars,
+    )
+
+    headers = dos_header + b"PE\x00\x00" + file_header + opt_header + section_header
+    headers = headers.ljust(size_of_headers, b"\x00")
+    body = headers + code.ljust(code_raw_size, b"\x00")
 
     with open(path, "wb") as f:
         f.write(body)
-    return entry
+    return base + code_rva

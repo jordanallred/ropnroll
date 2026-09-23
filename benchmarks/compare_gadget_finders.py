@@ -46,7 +46,7 @@ def bench_ropnroll(binary: str, max_insns: int) -> tuple[int, float]:
 
     def run():
         img = loader.load(binary)
-        return scanner.scan_image(img, scanner.ScanOptions(max_insns=max_insns))
+        return scanner.scan_image(img, scanner.ScanOptions(max_insns=max_insns), use_cache=False)
 
     gadgets, elapsed = _time_it(run)
     return len(gadgets), elapsed
@@ -86,6 +86,29 @@ def _find_ropper() -> str | None:
     return str(local) if local.exists() else None
 
 
+def _find_ropgadget() -> list[str] | None:
+    """Locate a way to invoke ROPgadget.
+
+    On Windows, pip/uv installs ROPgadget's console script as a shebang
+    file with no .exe wrapper (its setup.py uses scripts=, not the
+    console_scripts entry-point ropper uses), so it has no extension
+    shutil.which recognizes via PATHEXT and "ROPgadget" is invisible on
+    PATH even when it's installed. Fall back to invoking the importable
+    `ropgadget` module directly, which works the same on every platform.
+    """
+    found = shutil.which("ROPgadget")
+    if found:
+        return [found]
+    local = Path.home() / ".local" / "bin" / "ROPgadget"
+    if local.exists():
+        return [str(local)]
+    try:
+        import ropgadget  # noqa: F401
+    except ImportError:
+        return None
+    return [sys.executable, "-c", "import ropgadget; ropgadget.main()"]
+
+
 def bench_subprocess(cmd: list[str], count_pattern: str) -> tuple[int | None, float]:
     start = time.perf_counter()
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -116,13 +139,14 @@ def main():
         rows.append((f"ropnroll (max-insns={args.max_insns})", count, elapsed))
 
     if "ropgadget" in tools:
-        if shutil.which("ROPgadget"):
+        ropgadget_cmd = _find_ropgadget()
+        if ropgadget_cmd:
             count, elapsed = bench_subprocess(
-                ["ROPgadget", "--binary", args.binary, "--depth", str(args.ropgadget_depth)],
+                ropgadget_cmd + ["--binary", args.binary, "--depth", str(args.ropgadget_depth)],
                 r"Unique gadgets found:\s*(\d+)")
             rows.append((f"ROPgadget (depth={args.ropgadget_depth})", count, elapsed))
         else:
-            print("ROPgadget not found on PATH, skipping")
+            print("ROPgadget not found, skipping")
 
     if "ropper" in tools:
         ropper_bin = _find_ropper()

@@ -1,12 +1,15 @@
 # ropnroll
 
 ropnroll is a command-line tool and Python library for finding return-oriented
-programming (ROP) and jump-oriented programming (JOP) gadgets in binaries. It
-supports instruction-pattern and semantic searches, builds function-call and
-syscall chains, and can check generated chains with Unicorn emulation.
+programming (ROP) and jump-oriented programming (JOP) gadgets in **Windows PE
+binaries** (EXE/DLL, x86/x86-64/ARM64). It supports instruction-pattern and
+semantic searches, builds function-call chains against the MS x64/cdecl/
+stdcall calling conventions, and can check generated chains with Unicorn
+emulation.
 
-Use it to inspect binary mitigations, find gadgets with specific register effects,
-and assemble chains for exploit-development research and CTF challenges.
+Use it to inspect PE mitigations (DEP, ASLR, CFG, XFG, CET, SafeSEH), find
+gadgets with specific register effects, and assemble chains for Windows
+exploit-development research and CTF challenges.
 
 ## Why ropnroll
 
@@ -23,22 +26,24 @@ shortest candidates at each step -- within its depth and work bounds, it finds
 a minimum-gadget chain instead of giving up on one that a narrower search would
 miss. Repeated analysis of the same binary (the normal workflow while building
 an exploit) is backed by a persistent on-disk cache, so the second and later
-`search`/`call`/`syscall` invocation against the same target is fast; see
-`--no-cache` and `ROPNROLL_CACHE_DIR` below if you need to bypass or relocate it.
+`search`/`call` invocation against the same target is fast; see `--no-cache`
+and `ROPNROLL_CACHE_DIR` below if you need to bypass or relocate it.
 
 ## Installation
 
 Requires **Python 3.10 or newer**. Install from PyPI in a virtual environment:
 
-```bash
+```powershell
 python -m venv .venv
-source .venv/bin/activate
+.venv\Scripts\Activate.ps1
 python -m pip install ropnroll
 ropnroll --help
 ```
 
-On Windows, activate the environment with `.venv\Scripts\Activate.ps1` in
-PowerShell. Capstone, LIEF, Unicorn, and Rich are installed automatically.
+Capstone, LIEF, Unicorn, and Rich are installed automatically. ropnroll
+itself is a pure analysis tool (it never executes target code on the host),
+so it also runs fine from Linux/macOS if you're cross-analyzing a PE -- but
+Windows is the only platform it targets and tests against.
 
 If you use uv, you can run the CLI without a persistent installation:
 
@@ -51,17 +56,17 @@ uvx ropnroll --help
 Replace `./target` with the path to a binary you want to inspect.
 
 ```bash
-# Report binary mitigations, such as NX, PIE, and RELRO.
-ropnroll security ./target
+# Report a PE's mitigations: DEP, ASLR, stack canary, CFG/XFG, CET, SafeSEH.
+ropnroll security ./target.exe
 
 # List up to 20 gadgets.
-ropnroll scan ./target --limit 20
+ropnroll scan ./target.exe --limit 20
 
 # Find x86-64 gadgets by instruction text.
-ropnroll scan ./target --regex 'pop rdi'
+ropnroll scan ./target.exe --regex 'pop rcx'
 
 # Find x86-64 gadgets by their effect on registers.
-ropnroll search ./target --query 'rdi=rax+8'
+ropnroll search ./target.exe --query 'rcx=rax+8'
 ```
 
 `scan` prints gadget addresses and disassembly. `search` uses emulation to infer
@@ -74,23 +79,19 @@ Run `ropnroll <command> --help` for command options.
 
 | Command | Purpose |
 | --- | --- |
-| `security` | Report binary mitigations. |
+| `security` | Report a PE's mitigations. |
 | `scan` | List gadgets, optionally filtered by an instruction regex. |
 | `search` | Search for register or memory effects using semantic queries. |
 | `pivot` | Find stack-pivot gadgets. |
 | `jop` | Find JOP dispatcher gadgets. |
 | `call` | Build a chain that calls a function by symbol or address. |
-| `syscall` | Build a chain for a syscall number and arguments. |
-| `srop` | Build a Linux x86-64 sigreturn-oriented `execve` chain. |
-| `onegadget` | Search for execution paths that reach `execve` in emulation. |
-| `libcid` | Identify a libc build using symbol offsets via libc.rip. |
 
 ### Build and export a chain
 
-For a binary that contains the `exit` symbol and suitable gadgets:
+For a binary that contains a suitable exported symbol and gadgets:
 
 ```bash
-ropnroll call ./target --target exit --args 0 --verify --emit json --out chain.json
+ropnroll call ./target.exe --target ExitProcess --args 0 --verify --emit json --out chain.json
 ```
 
 `--target` accepts a symbol name or numeric address. `--args` accepts
@@ -101,14 +102,13 @@ report before using the output. Export formats are `json`, `raw`, `c`, and
 You can pool gadgets from multiple binaries:
 
 ```bash
-ropnroll search ./target ./libc.so.6 --query 'rdi=rax+8'
+ropnroll search ./target.exe ./kernel32.dll --query 'rcx=rax+8'
 ```
 
-`call`, `syscall`, `srop`, `pivot`, and `jop` also accept multiple paths.
-Addresses come from the loaded images and reflect each file's own preferred
-base -- pass `--base path=0xaddr` (repeatable) to override a specific binary's
-base with a leaked runtime address instead, e.g. for an ASLR-relocated
-Windows DLL:
+`call`, `pivot`, and `jop` also accept multiple paths. Addresses come from the
+loaded images and reflect each file's own preferred base -- pass `--base
+path=0xaddr` (repeatable) to override a specific binary's base with a leaked
+runtime address instead, e.g. for an ASLR-relocated DLL:
 
 ```bash
 ropnroll call ./target.exe ./kernel32.dll --base kernel32.dll=0x7ffb2a3c0000 \
@@ -119,30 +119,15 @@ Loading `kernel32.dll` alongside the target is what makes `--target
 VirtualProtect` resolve at all: the CLI only resolves symbol names against a
 binary's own *exports*, not another binary's imports, so a function the
 target merely calls (rather than defines) must come from a binary that
-actually exports it -- the same pattern as `./target ./libc.so.6 --target
-system` on Linux. Pointer arguments (like `VirtualProtect`'s output
+actually exports it. Pointer arguments (like `VirtualProtect`'s output
 parameter above) must refer to valid memory in the intended target; nothing
-here allocates scratch space for you. The Python API also provides
-live-process loading and rebasing through `ropnroll.orchestrate` on Linux.
+here allocates scratch space for you.
 
 For x86-64, `call` accepts `--bytes-before-chain N` (bytes of payload
 preceding the chain in your final buffer) to automatically correct stack
 alignment for the call instruction, matching what a real `call` would have
 left behind -- entering a function at the wrong 16-byte parity is a common,
-easy-to-miss way a ret2libc-style chain crashes inside the callee's own SSE
-instructions.
-
-### Identify libc
-
-Supply offsets relative to libc's base, rather than absolute runtime addresses:
-
-```bash
-ropnroll libcid --symbol system=0x58750 --symbol read=0x11bd20
-```
-
-These are illustrative offsets; replace them with values from your libc.
-This command requires internet access and sends the supplied symbol offsets to
-libc.rip. Add `--download ./libc.so.6` to download the first matching build.
+easy-to-miss way a chain crashes inside the callee's own SSE instructions.
 
 ### Caching
 
@@ -150,21 +135,18 @@ Semantic effects (the expensive part -- several Unicorn runs per gadget) are
 cached on disk per binary, keyed by its content hash, so repeated commands
 against the same target reuse prior analysis instead of redoing it. Pass
 `--no-cache` to any command to bypass the cache for that run. The cache lives
-under `~/.cache/ropnroll` on Linux/macOS or `%LOCALAPPDATA%\ropnroll` on
-Windows by default; set `ROPNROLL_CACHE_DIR` to relocate it.
+under `%LOCALAPPDATA%\ropnroll` by default; set `ROPNROLL_CACHE_DIR` to
+relocate it.
 
 ## Supported targets and limitations
 
 | Target | Scope |
 | --- | --- |
-| Linux x86-64 ELF | Primary target for scanning, semantic analysis, chain building, and verification. |
-| Windows x86 / x86-64 PE | Loading, mitigation reporting, and scanning; calling-convention support is implemented. |
-| x86 ELF (32-bit) | Scanner support; end-to-end chain coverage is limited. |
-| ARM32, ARM64, MIPS32, MIPS64 | Scanner and semantic-engine implementations; not covered by real-binary architecture tests. |
-| RISC-V, PowerPC, Thumb | Unsupported. |
+| Windows x86-64 PE (EXE/DLL) | Primary target for scanning, semantic analysis, chain building, and verification. |
+| Windows x86 PE (32-bit) | Loading, mitigation reporting (incl. SafeSEH), and scanning; cdecl/stdcall calling-convention support is implemented. |
+| Windows ARM64 PE | Scanner and semantic-engine implementation; not covered by real-binary architecture tests. |
+| ELF, Mach-O, other architectures | Unsupported -- ropnroll only reads PE. |
 
-- SROP is limited to Linux x86-64. Its verifier simulates sigreturn semantics.
-- `onegadget` is limited to x86/x86-64 and uses syscall stubs, not a full OS.
 - Semantic effects are inferred from a finite set of emulation trials, not
   formally proved for every possible input.
 - Chain search (a best-first/A* search over candidate gadgets) has depth and
@@ -180,23 +162,19 @@ Windows by default; set `ROPNROLL_CACHE_DIR` to relocate it.
 
 ## Development
 
-```bash
+```powershell
 git clone https://github.com/jordanallred/ropnroll.git
 cd ropnroll
 python -m venv .venv
-source .venv/bin/activate
+.venv\Scripts\Activate.ps1
 python -m pip install -e '.[dev]'
 python -m pytest -q
 ```
 
-For the Linux integration tests, use an x86-64 Linux environment with GCC and
-system libc available. Tests that require missing fixtures or tools may skip.
-The repository also includes Windows PE fixtures for loader and scanner tests.
-
-The [live-process example](https://github.com/jordanallred/ropnroll/blob/main/examples/live_fire_demo.py)
-shows how to build and deliver a chain against the included vulnerable test
-program. It requires Linux x86-64, GCC, pwntools (`python -m pip install
-pwntools`), and access to `/proc/<pid>/maps`.
+Several tests scan `C:\Windows\System32\ntdll.dll` as a realistic, large PE
+fixture; they skip automatically off Windows. The repository also includes
+small, purpose-built PE fixtures under `tests/fixtures/pe/` for loader and
+scanner tests.
 
 ## Help and contributions
 

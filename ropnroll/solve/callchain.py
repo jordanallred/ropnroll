@@ -1,6 +1,6 @@
-"""Build a ret2func / ret2libc-style chain: load the calling-convention
-registers (or push stack args for cdecl/stdcall), then transfer control to
-the target function address directly (classic "return into libc" -- the
+"""Build a ret2func-style chain: load the calling-convention registers (or
+push stack args for cdecl/stdcall), then transfer control to the target
+function address directly (classic "return into a DLL export" -- the
 callee's own `ret` is what would normally pop a return address, so we let
 the caller decide what -- if anything -- goes there via Chain.set_last)."""
 from __future__ import annotations
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from ..core.archinfo import ArchInfo
 from ..core.gadget import Terminator
-from .chain import Chain, ChainWord, SolveResult, set_registers
+from .chain import Chain, ChainWord, SolveResult, _tag, set_registers
 from .pool import GadgetPool
 
 # Microsoft x64 ABI: RCX, RDX, R8, R9 (not SysV's RDI/RSI/RDX/RCX/R8/R9),
@@ -26,7 +26,12 @@ class CallResult:
     ok: bool
 
 
-def _arg_regs(ai: ArchInfo, os: str) -> list[str]:
+def arg_regs(ai: ArchInfo, os: str) -> list[str]:
+    """The calling-convention argument registers for `ai`'s arch under `os`
+    -- exported (not just used internally by `build_call`) so callers that
+    need to check what a chain *should* have set (e.g. `--verify`'s goal
+    registers) use the same OS-aware answer instead of falling back to
+    `ai.call_arg_regs`, which is SysV-only and wrong for x86-64 Windows."""
     if ai.arch == "x86_64" and os == "windows":
         return _MS64_ARGS
     return ai.call_arg_regs
@@ -34,7 +39,7 @@ def _arg_regs(ai: ArchInfo, os: str) -> list[str]:
 
 def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | None = None,
                 avoid: set = frozenset(), max_insns: int = 6,
-                bytes_before_chain: int | None = None) -> CallResult:
+                bytes_before_chain: int | None = None, target_module: str | None = None) -> CallResult:
     """`bytes_before_chain`: how many bytes of payload precede this chain
     in the final buffer (e.g. the overflow padding before it starts) --
     when given, on x86-64 SysV this automatically inserts a single bare
@@ -48,12 +53,12 @@ def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | 
     alignment-corrected.
     """
     ai = pool.ai
-    arg_regs = _arg_regs(ai, pool.os)
-    if arg_regs:
-        if len(args) > len(arg_regs):
-            raise ValueError(f"{ai.arch}/{pool.os} register-passed args max is {len(arg_regs)}, "
+    argregs = arg_regs(ai, pool.os)
+    if argregs:
+        if len(args) > len(argregs):
+            raise ValueError(f"{ai.arch}/{pool.os} register-passed args max is {len(argregs)}, "
                               f"got {len(args)} (stack-spilled args not yet supported)")
-        targets = {arg_regs[i]: v for i, v in enumerate(args)}
+        targets = {argregs[i]: v for i, v in enumerate(args)}
         res = set_registers(pool, targets, avoid=avoid, max_insns=max_insns)
         if not res.ok or res.chain is None:
             return CallResult(chain=None, solve=res, ok=False)
@@ -64,10 +69,11 @@ def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | 
             if target_word_offset % 16 != 0:
                 pads = [g for g in pool.shortlist_terminator(Terminator.RET, max_insns=1) if g.n_insns == 1]
                 if pads:
-                    chain.set_last(pads[0].address, f"alignment pad (bare ret) 0x{pads[0].address:x}")
+                    chain.set_last_gadget(pool, pads[0], f"alignment pad (bare ret) 0x{pads[0].address:x}")
                     chain.words.append(ChainWord(None, "-> next"))
 
-        chain.set_last(target, f"call target 0x{target:x}")
+        t_module, t_offset = _tag(pool, target_module, target)
+        chain.set_last(target, f"call target 0x{target:x}", module=t_module, offset=t_offset)
         if ai.arch == "x86_64" and pool.os == "windows":
             for i in range(_MS64_SHADOW_SPACE // ai.reg_width):
                 chain.append_raw(0, "MS x64 shadow space (callee may spill args here)")
@@ -79,7 +85,8 @@ def build_call(pool: GadgetPool, target: int, args: list[int], return_to: int | 
         # before the target's own address (which itself sits where the
         # target's `ret` will look for its own return address).
         chain = Chain(ai=ai)
-        chain.append_raw(target, f"call target 0x{target:x}")
+        t_module, t_offset = _tag(pool, target_module, target)
+        chain.words.append(ChainWord(target, f"call target 0x{target:x}", module=t_module, offset=t_offset))
         if return_to is not None:
             chain.append_raw(return_to, f"return address after call 0x{return_to:x}")
         else:

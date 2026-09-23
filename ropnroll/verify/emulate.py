@@ -6,7 +6,7 @@ Everything upstream (the semantic engine, the solver) is built out of
 *per-gadget* measurements and a model of how they compose. This module
 throws that model away and just runs the assembled chain, for real, on an
 emulated CPU with the target's actual memory mapped in. It can't prove a
-chain works against the real, live target (ASLR base, exact libc build,
+chain works against the real, live target (ASLR base, exact DLL build,
 stack layout may differ) but it proves the chain is *internally
 consistent* -- every gadget decodes and behaves the way the solver assumed,
 nothing double-clobbers a register you needed, and you find out now
@@ -43,27 +43,36 @@ class VerifyReport:
     trace: list[int] = field(default_factory=list)
 
 
-def verify_chain(img: Image, chain: Chain, *, final_target: Optional[int] = None,
+def verify_chain(img: Image | list[Image], chain: Chain, *, final_target: Optional[int] = None,
                   goal_regs: Optional[dict[str, int]] = None,
                   initial_regs: Optional[dict[str, int]] = None,
                   stack_addr: int = STACK_ADDR_DEFAULT, max_insns: int = 20000,
                   trace_limit: int = 64) -> VerifyReport:
-    ai = get_archinfo(img.arch, img.little_endian)
+    """`img` is normally the single binary a chain's gadgets came from, but
+    a chain built with `call`/`syscall` against multiple `--binary` paths
+    (e.g. gadgets from a target EXE calling into a function that only
+    kernel32.dll exports) has code living in more than one module's address
+    range -- pass the full list of images in that case, or this only maps
+    one of them and the emulator faults the instant execution reaches the
+    other."""
+    imgs = [img] if isinstance(img, Image) else list(img)
+    ai = get_archinfo(imgs[0].arch, imgs[0].little_endian)
     mu = uc.Uc(ai.uc_arch, ai.uc_mode)
 
-    for seg in img.segments:
-        base = _align_down(seg.vaddr, 0x1000)
-        end = (seg.vaddr + seg.size + 0xFFF) & ~0xFFF
-        try:
-            mu.mem_map(base, end - base)
-        except uc.UcError:
-            continue
-        buf = bytearray(end - base)
-        pad = seg.vaddr - base
-        buf[pad:pad + seg.size] = seg.data
-        mu.mem_write(base, bytes(buf))
+    for im in imgs:
+        for seg in im.segments:
+            base = _align_down(seg.vaddr, 0x1000)
+            end = (seg.vaddr + seg.size + 0xFFF) & ~0xFFF
+            try:
+                mu.mem_map(base, end - base)
+            except uc.UcError:
+                continue  # already mapped -- e.g. re-verifying, or an overlap with another image
+            buf = bytearray(end - base)
+            pad = seg.vaddr - base
+            buf[pad:pad + seg.size] = seg.data
+            mu.mem_write(base, bytes(buf))
 
-    chain_bytes = chain.to_bytes(little_endian=img.little_endian)
+    chain_bytes = chain.to_bytes(little_endian=imgs[0].little_endian)
     stack_size = max(0x10000, (len(chain_bytes) + 0x4000 + 0xFFF) & ~0xFFF)
     stack_base = _align_down(stack_addr, 0x1000)
     mu.mem_map(stack_base, stack_size)

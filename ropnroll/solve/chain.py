@@ -27,6 +27,29 @@ DEFAULT_JUNK = 0x4141414141414141
 class ChainWord:
     value: Optional[int]
     label: str
+    # Set only when `value` was computed against a module whose real
+    # runtime base isn't known yet (Image.base_known is False -- an
+    # ASLR-relocatable module that hasn't been .rebase()'d to a leaked
+    # address). `value` still holds the file's own linker-preferred-base
+    # address in that case (harmless, and what verification emulates
+    # against -- see chain.py module docstring in callchain.py), but export
+    # formats that produce a real payload (to_raw/to_c_array) must treat a
+    # tagged word as unresolved rather than silently baking it in: `offset`
+    # is base-invariant (address - image_base survives rebase()), so a
+    # caller who learns the real base later can compute base + offset
+    # themselves -- exactly the "leak now, resolve at exploit time"
+    # workflow this exists for.
+    module: Optional[str] = None
+    offset: Optional[int] = None
+
+
+def _tag(pool: Optional["GadgetPool"], module: str, address: int) -> tuple[Optional[str], Optional[int]]:
+    if pool is None or not module:
+        return None, None
+    img = pool.image_of(module)
+    if img is None or img.base_known:
+        return None, None
+    return module, address - img.image_base
 
 
 @dataclass
@@ -36,9 +59,11 @@ class Chain:
     warnings: list[str] = field(default_factory=list)
 
     def append_gadget_block(self, gadget: Gadget, effect: GadgetEffect,
-                             fills: dict[int, tuple[int, str]]):
+                             fills: dict[int, tuple[int, str]], pool: Optional["GadgetPool"] = None):
         w = self.ai.reg_width
-        self.words.append(ChainWord(gadget.address, f"0x{gadget.address:x}: {gadget.text}"))
+        module, offset = _tag(pool, gadget.module, gadget.address)
+        self.words.append(ChainWord(gadget.address, f"0x{gadget.address:x}: {gadget.text}",
+                                     module=module, offset=offset))
         n_slots = max(0, effect.sp_delta // w - 1)
         for i in range(n_slots):
             off = i * w
@@ -49,16 +74,25 @@ class Chain:
                 self.words.append(ChainWord(None, "junk (unused stack slot)"))
         self.words.append(ChainWord(None, "-> next"))
 
-    def set_last(self, value: int, label: str):
+    def set_last(self, value: int, label: str,
+                 module: Optional[str] = None, offset: Optional[int] = None):
+        word = ChainWord(value, label, module=module, offset=offset)
         if not self.words:
-            self.words.append(ChainWord(value, label))
+            self.words.append(word)
         else:
-            self.words[-1] = ChainWord(value, label)
+            self.words[-1] = word
+
+    def set_last_gadget(self, pool: Optional["GadgetPool"], gadget: Gadget, label: str):
+        """Like set_last, but tags the word against `gadget`'s own module
+        so an unresolved base stays symbolic instead of being baked in."""
+        module, offset = _tag(pool, gadget.module, gadget.address)
+        self.set_last(gadget.address, label, module=module, offset=offset)
 
     def extend(self, other: "Chain"):
         if not other.words:
             return
-        self.set_last(other.words[0].value, other.words[0].label)
+        first = other.words[0]
+        self.set_last(first.value, first.label, module=first.module, offset=first.offset)
         self.words.extend(other.words[1:])
         self.warnings.extend(other.warnings)
 
@@ -118,7 +152,7 @@ def _no_unsafe_memory_access(effect: GadgetEffect, ai: ArchInfo) -> bool:
     control -- it's our own chain layout) or a fixed constant address is
     safe to accept automatically; anything keyed off another register is
     a live landmine the caller has no way to see from the chain listing.
-    Found by the verifier catching exactly this on a real libc build.
+    Found by the verifier catching exactly this on a real DLL build.
     """
     for mem in effect.mem_writes + effect.mem_reads:
         if mem.addr.kind == EKind.CONST:
@@ -343,7 +377,7 @@ def set_registers(pool: GadgetPool, targets: dict[str, int],
     chain = Chain(ai=ai)
     for g, eff, fills in chosen:
         step = Chain(ai=ai)
-        step.append_gadget_block(g, eff, fills)
+        step.append_gadget_block(g, eff, fills, pool=pool)
         if chain.words:
             # link the previous block's open "-> next" placeholder to this
             # gadget's own address instead of leaving both dangling

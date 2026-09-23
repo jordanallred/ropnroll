@@ -8,9 +8,8 @@ from ropnroll.core import loader, scanner
 from ropnroll.solve.callchain import build_call
 from ropnroll.solve.chain import set_registers
 from ropnroll.solve.pool import GadgetPool
-from ropnroll.solve.syscallchain import build_syscall
 from ropnroll.verify.emulate import verify_chain
-from tests.helpers import write_minimal_elf
+from tests.helpers import write_minimal_pe
 
 
 def _pool(img_path, max_insns=6):
@@ -21,11 +20,11 @@ def _pool(img_path, max_insns=6):
     return pool, img
 
 
-def test_direct_register_solve_and_verify(libc_path):
-    pool, img = _pool(libc_path)
-    res = set_registers(pool, {"rdi": 0x1337, "rsi": 0, "rdx": 0x41414141})
+def test_direct_register_solve_and_verify(ntdll_path):
+    pool, img = _pool(ntdll_path)
+    res = set_registers(pool, {"rcx": 0x1337, "rdx": 0, "r8": 0x41414141})
     assert res.ok, res.log
-    goal = {"rdi": 0x1337, "rsi": 0, "rdx": 0x41414141}
+    goal = {"rcx": 0x1337, "rdx": 0, "r8": 0x41414141}
     rep = verify_chain(img, res.chain, goal_regs=goal)
     # no final_target is given, so the chain legitimately runs off its own
     # end into an unfilled placeholder -- that's expected, not a failure.
@@ -34,60 +33,25 @@ def test_direct_register_solve_and_verify(libc_path):
     assert all(ok for ok, *_ in rep.goal_results.values())
 
 
-def test_ret2libc_system_binsh(libc_path):
-    pool, img = _pool(libc_path)
-    system_addr = img.symbols["system"]
-    binsh = None
-    for seg in img.segments:
-        if not seg.executable and seg.readable:
-            idx = seg.data.find(b"/bin/sh\x00")
-            if idx != -1:
-                binsh = seg.vaddr + idx
-                break
-    assert binsh is not None
-    res = build_call(pool, target=system_addr, args=[binsh])
+def test_call_windows_export_with_ms64_args(ntdll_path):
+    """Windows analog of a classic ret2libc call: reach a real exported
+    function's entry with the MS x64 ABI's argument registers (rcx/rdx,
+    not SysV's rdi/rsi) set correctly. final_target stops emulation the
+    instant rip reaches the export, so this doesn't need the function
+    itself to run to completion."""
+    pool, img = _pool(ntdll_path)
+    target_addr = img.symbols["RtlComputeCrc32"]
+    res = build_call(pool, target=target_addr, args=[0, 0x1337])
     assert res.ok
-    rep = verify_chain(img, res.chain, final_target=system_addr, goal_regs={"rdi": binsh})
+    rep = verify_chain(img, res.chain, final_target=target_addr, goal_regs={"rcx": 0, "rdx": 0x1337})
     assert rep.ok, rep.fault
 
 
-def test_direct_execve_syscall_binsh(libc_path):
-    binsh = None
-    for seg in loader.load(libc_path).segments:
-        if not seg.executable and seg.readable:
-            idx = seg.data.find(b"/bin/sh\x00")
-            if idx != -1:
-                binsh = seg.vaddr + idx
-                break
-    assert binsh is not None
-
-    # Which gadgets the solver ends up choosing depends on the exact glibc
-    # build's own code layout, which differs across systems (confirmed: a
-    # gadget that solved and verified cleanly on one machine caused a real
-    # CPU exception on another glibc build's equivalent address, because
-    # the specific instructions living there differ). Rather than hardcode
-    # one instruction-count window that happened to work on one system,
-    # widen the search the same way real usage would if verification
-    # doesn't pass, and require *some* window to produce a working chain.
-    last_report = None
-    for max_insns in (6, 9, 12, 15):
-        pool, img = _pool(libc_path, max_insns=max_insns)
-        res = build_syscall(pool, nr=59, args=[binsh, 0, 0], max_insns=max_insns)
-        if not res.ok:
-            continue
-        rep = verify_chain(img, res.chain, final_target=res.gadget_addr)
-        last_report = rep
-        if rep.ok:
-            return
-    assert last_report is not None and last_report.ok, \
-        f"no working execve chain found up to max_insns=15; last attempt: {last_report}"
-
-
-def test_stack_pivot_gadgets_rejected_by_general_solver(libc_path):
+def test_stack_pivot_gadgets_rejected_by_general_solver(ntdll_path):
     """Regression: a `leave ; ret`-style gadget must never be silently
     picked to set a plain register -- it pivots rsp to an uncontrolled
     value (rbp), corrupting every subsequent stack offset in the chain."""
-    pool, img = _pool(libc_path)
+    pool, img = _pool(ntdll_path)
     res = set_registers(pool, {"rax": 0x1234, "rdx": 0x5678})
     if not res.ok:
         return  # fine -- just means no such gadget existed to mis-pick
@@ -97,16 +61,15 @@ def test_stack_pivot_gadgets_rejected_by_general_solver(libc_path):
             raise AssertionError("a leave-based pivot gadget was used as a plain register setter")
 
 
-def test_call_chain_alignment_pad(libc_path):
+def test_call_chain_alignment_pad(ntdll_path):
     """Regression: entering a function via a direct `ret` (no `call`
     instruction) must leave it with the same rsp%16==8 residue it would
     see from a real call, or its own callees crash on the first SSE
-    instruction requiring 16-byte alignment. Confirmed against a real
-    live process in examples/live_fire_demo.py; this checks the parity
-    math itself against several arbitrary amounts of preceding padding.
+    instruction requiring 16-byte alignment. This checks the parity math
+    itself against several arbitrary amounts of preceding padding.
     """
-    pool, img = _pool(libc_path)
-    system_addr = img.symbols["system"]
+    pool, img = _pool(ntdll_path)
+    target_addr = img.symbols["RtlComputeCrc32"]
     # only multiples of 8 are realistic here: x86-64 stack frames are
     # always 8-byte aligned, so padding before a return-address overwrite
     # is inherently a multiple of the pointer width. A single 8-byte pad
@@ -114,10 +77,10 @@ def test_call_chain_alignment_pad(libc_path):
     # by one word" misalignment, not an arbitrary byte-level skew -- that
     # never occurs on a real stack.
     for padding in (0, 8, 40, 72, 104):
-        res = build_call(pool, target=system_addr, args=[0x1000], bytes_before_chain=padding)
+        res = build_call(pool, target=target_addr, args=[0x1000], bytes_before_chain=padding)
         assert res.ok
         target_word_index = next(i for i, w in enumerate(res.chain.words)
-                                  if w.value == system_addr)
+                                  if w.value == target_addr)
         target_offset = padding + target_word_index * 8
         assert target_offset % 16 == 0, (padding, target_offset)
 
@@ -133,8 +96,8 @@ def test_multihop_indirection_forced(tmp_path):
         return bytes(enc)
 
     code = asm("pop rax; ret") + asm("mov rbx, rax; ret") + asm("mov rdi, rbx; ret")
-    path = str(tmp_path / "indirect.elf")
-    write_minimal_elf(path, "x86_64", code, base=0x400000)
+    path = str(tmp_path / "indirect.exe")
+    write_minimal_pe(path, "x86_64", code, base=0x400000)
 
     pool, img = _pool(path)
     res = set_registers(pool, {"rdi": 0x1337})
@@ -167,7 +130,7 @@ def _write_beyond_old_breadth_binary(path):
     code += asm("cmp rax, rdi ; ret") + asm("cmp rbx, rdi ; ret")
     code += asm("mov rdi, r12 ; ret")
     code += asm("pop r12 ; ret")
-    write_minimal_elf(path, "x86_64", code, base=0x400000)
+    write_minimal_pe(path, "x86_64", code, base=0x400000)
 
 
 def test_indirect_solver_finds_chain_beyond_old_fixed_breadth_cutoff(tmp_path):
@@ -178,7 +141,7 @@ def test_indirect_solver_finds_chain_beyond_old_fixed_breadth_cutoff(tmp_path):
     so that's exactly what would happen to the old code, and confirms the
     new best-first search still finds and verifies the chain.
     """
-    path = str(tmp_path / "beyond_breadth.elf")
+    path = str(tmp_path / "beyond_breadth.exe")
     _write_beyond_old_breadth_binary(path)
 
     pool, img = _pool(path)
@@ -215,7 +178,7 @@ def test_indirect_solver_is_deterministic_across_hash_seeds(tmp_path):
     same search in two subprocesses with different hash seeds and require
     byte-identical results, not just "a" result.
     """
-    path = str(tmp_path / "determinism.elf")
+    path = str(tmp_path / "determinism.exe")
     _write_beyond_old_breadth_binary(path)
 
     import pathlib

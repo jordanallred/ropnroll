@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ropnroll"
-version = "0.2.0"
-description = "Semantic ROP/JOP gadget finder and automatic exploit-chain synthesizer"
+version = "0.3.0"
+description = "Semantic ROP/JOP gadget finder and automatic exploit-chain synthesizer for Windows PE binaries"
 readme = "README.md"
-keywords = ["rop", "jop", "gadgets", "binary-analysis", "security"]
+keywords = ["rop", "jop", "gadgets", "binary-analysis", "security", "windows", "pe"]
 requires-python = ">=3.10"
 dependencies = [
     "capstone>=5.0",

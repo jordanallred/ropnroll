@@ -1,5 +1,6 @@
 from ropnroll.core import loader, scanner
-from ropnroll.core.cache import EffectDiskCache
+from ropnroll.core.cache import EffectDiskCache, GadgetScanCache
+from ropnroll.core.scanner import SCANNER_VERSION, _scan_key
 from ropnroll.semantics.effect import EKind, GadgetEffect, MemEffect, RegEffect
 from ropnroll.semantics.engine import SEMANTIC_ENGINE_VERSION, SemanticEngine
 
@@ -50,8 +51,58 @@ def test_disk_cache_version_mismatch_is_cold(tmp_path):
     assert newer.get(raw) is None
 
 
-def test_semantic_engine_warm_cache_matches_fresh_computation(libc_path, tmp_path):
-    img = loader.load(libc_path)
+def test_scan_cache_roundtrip(tmp_path):
+    opts = scanner.ScanOptions(max_insns=4)
+    key = _scan_key(opts)
+    entries = [(0x10, b"\x5f\xc3", "RET"), (0x100, b"\x58\xc3", "RET")]
+    cache = GadgetScanCache("deadbeef", key, SCANNER_VERSION, root=tmp_path)
+    assert cache.get() is None
+    cache.put(entries)
+
+    reloaded = GadgetScanCache("deadbeef", key, SCANNER_VERSION, root=tmp_path)
+    assert reloaded.get() == entries
+
+
+def test_scan_cache_version_mismatch_is_cold(tmp_path):
+    opts = scanner.ScanOptions(max_insns=4)
+    key = _scan_key(opts)
+    cache = GadgetScanCache("deadbeef", key, SCANNER_VERSION, root=tmp_path)
+    cache.put([(0x10, b"\x5f\xc3", "RET")])
+
+    newer = GadgetScanCache("deadbeef", key, SCANNER_VERSION + 1, root=tmp_path)
+    assert newer.get() is None
+
+
+def test_scan_cache_option_mismatch_is_cold(tmp_path):
+    cache = GadgetScanCache("deadbeef", _scan_key(scanner.ScanOptions(max_insns=4)),
+                             SCANNER_VERSION, root=tmp_path)
+    cache.put([(0x10, b"\x5f\xc3", "RET")])
+
+    other = GadgetScanCache("deadbeef", _scan_key(scanner.ScanOptions(max_insns=6)),
+                             SCANNER_VERSION, root=tmp_path)
+    assert other.get() is None
+
+
+def test_scan_image_warm_cache_matches_fresh_scan(ntdll_path):
+    # relies on the autouse _isolated_ropnroll_cache_dir fixture (conftest.py)
+    # so this doesn't read/write the developer's real cache.
+    img = loader.load(ntdll_path)
+    opts = scanner.ScanOptions(max_insns=4)
+
+    fresh = scanner.scan_image(img, opts, use_cache=False)
+    assert fresh
+
+    warm = scanner.scan_image(img, opts, use_cache=True)
+    assert [(g.address, g.raw, g.terminator) for g in warm] == \
+           [(g.address, g.raw, g.terminator) for g in fresh]
+
+    cached_only = scanner.scan_image(img, opts, use_cache=True)
+    assert [(g.address, g.raw, g.text, g.terminator) for g in cached_only] == \
+           [(g.address, g.raw, g.text, g.terminator) for g in fresh]
+
+
+def test_semantic_engine_warm_cache_matches_fresh_computation(ntdll_path, tmp_path):
+    img = loader.load(ntdll_path)
     gadgets = scanner.scan_image(img, scanner.ScanOptions(max_insns=4))[:25]
     assert gadgets
 

@@ -3,7 +3,7 @@ import keystone
 from ropnroll.core import loader, scanner
 from ropnroll.solve import jop
 from ropnroll.solve.pool import GadgetPool
-from tests.helpers import write_minimal_elf
+from tests.helpers import write_minimal_pe
 
 
 def _dispatcher_pool(tmp_path):
@@ -17,8 +17,8 @@ def _dispatcher_pool(tmp_path):
     # exactly the "<advance dispatch-reg> ; jmp [dispatch-reg]" shape
     # find_dispatchers looks for.
     code = asm("add rbx, 8; jmp qword ptr [rbx]")
-    path = str(tmp_path / "dispatcher.elf")
-    write_minimal_elf(path, "x86_64", code, base=0x400000)
+    path = str(tmp_path / "dispatcher.exe")
+    write_minimal_pe(path, "x86_64", code, base=0x400000)
 
     img = loader.load(path)
     gadgets = scanner.scan_image(img, scanner.ScanOptions(max_insns=6))

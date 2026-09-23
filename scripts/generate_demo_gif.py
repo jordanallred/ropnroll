@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate docs/assets/demo.gif from real ropnroll CLI output.
+"""Regenerate docs/assets/demo*.gif from real ropnroll CLI output.
 
 Runs a fixed sequence of `ropnroll` commands against the repo's PE test
 fixtures inside a pseudo-terminal (so Rich renders its normal colored
@@ -8,7 +8,17 @@ rasterizes each screen state with Pillow into an animated GIF. Every frame
 is real tool output -- nothing here fabricates or edits what ropnroll
 prints.
 
-Requires `pyte` and `pillow` (not runtime dependencies of ropnroll itself):
+The chain-building demo needs a target with an exported symbol to call,
+which the repo's `tests/fixtures/pe/cli-*.exe` don't have (they're plain
+EXEs, not DLLs). build_chain_fixture() makes a small derived copy of
+cli-64.exe with one extra section -- a couple of real x86-64 instructions
+(`pop rcx ; ret` and `mov eax, ecx ; ret`) -- and exports the second one as
+"ExitProcess", purely so `ropnroll call` has a real symbol and gadget to
+find. It's a purpose-built demo fixture, not a claim that cli-64.exe itself
+exports anything.
+
+Requires `pyte`, `pillow`, and `lief` (lief is already a runtime dependency
+of ropnroll; pyte/pillow are not):
 
     pip install pyte pillow
     python scripts/generate_demo_gif.py
@@ -21,14 +31,16 @@ import select
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 
+import lief
 import pyte
 from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = "tests/fixtures/pe/cli-64.exe"
-OUT_PATH = os.path.join(REPO_ROOT, "docs", "assets", "demo.gif")
+ASSETS_DIR = os.path.join(REPO_ROOT, "docs", "assets")
 
 COLS, ROWS = 104, 34
 FONT_SIZE = 16
@@ -84,8 +96,8 @@ LINE_H = int(FONT_SIZE * 1.45)
 IMG_W = int(PADDING * 2 + CHAR_W * COLS)
 IMG_H = int(PADDING * 2 + LINE_H * ROWS + 40)
 
-COMMANDS = [
-    ("security", ["ropnroll", "security", FIXTURE], f"ropnroll security cli-64.exe"),
+RECON_COMMANDS = [
+    ("security", ["ropnroll", "security", FIXTURE], "ropnroll security cli-64.exe"),
     (
         "scan",
         ["ropnroll", "scan", FIXTURE, "--regex", "pop r.x", "--limit", "6"],
@@ -95,6 +107,45 @@ COMMANDS = [
         "pivot",
         ["ropnroll", "pivot", FIXTURE, "--limit", "4"],
         "ropnroll pivot cli-64.exe --limit 4",
+    ),
+]
+
+
+def build_chain_fixture(out_path):
+    """Derive a small demo PE from cli-64.exe with a callable export.
+
+    Adds one section containing `pop rcx ; ret` followed by
+    `mov eax, ecx ; ret`, and exports the latter as "ExitProcess" -- real,
+    disassemblable x86-64 code and a real export directory, just authored
+    for this demo rather than found in the wild.
+    """
+    binary = lief.parse(os.path.join(REPO_ROOT, FIXTURE))
+    stub = bytes([0x59, 0xC3, 0x8B, 0xC1, 0xC3])  # pop rcx;ret / mov eax,ecx;ret
+    stub_offset = 2  # "ExitProcess" starts at the mov eax, ecx ; ret
+
+    section = lief.PE.Section(".xtra", list(stub))
+    section.characteristics = (
+        int(lief.PE.Section.CHARACTERISTICS.CNT_CODE)
+        | int(lief.PE.Section.CHARACTERISTICS.MEM_EXECUTE)
+        | int(lief.PE.Section.CHARACTERISTICS.MEM_READ)
+    )
+    added = binary.add_section(section)
+    binary.set_export(lief.PE.Export(
+        "chain-demo.exe", [lief.PE.ExportEntry("ExitProcess", added.virtual_address + stub_offset)],
+    ))
+
+    config = lief.PE.Builder.config_t()
+    config.exports = True
+    builder = lief.PE.Builder(binary, config)
+    builder.build()
+    builder.write(out_path)
+
+
+CHAIN_COMMANDS = [
+    (
+        "call",
+        ["ropnroll", "call", "chain-demo.exe", "--target", "ExitProcess", "--args", "0", "--verify", "--emit", "pwntools"],
+        "ropnroll call chain-demo.exe --target ExitProcess --args 0 --verify --emit pwntools",
     ),
 ]
 
@@ -225,7 +276,7 @@ def type_command(sess, prompt, cmd, chars_per_frame=3, frame_ms=55):
     for i in range(0, len(cmd), chars_per_frame):
         sess.feed_text(cmd[i:i + chars_per_frame])
         sess.snapshot(frame_ms)
-    sess.feed_text("\n")
+    sess.feed_text("\r\n")
 
 
 def play_output(sess, raw_bytes, n_chunks=26, frame_ms=70, end_hold_ms=1900):
@@ -242,14 +293,22 @@ def play_output(sess, raw_bytes, n_chunks=26, frame_ms=70, end_hold_ms=1900):
     sess.snapshot(end_hold_ms)
 
 
-def main():
+def record(commands, cwd, out_path):
     sess = Session()
-    for name, argv, display_cmd in COMMANDS:
+    for name, argv, display_cmd in commands:
         type_command(sess, "$ ", display_cmd)
-        raw = run_in_pty(argv, REPO_ROOT)
+        raw = run_in_pty(argv, cwd)
         play_output(sess, raw)
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-    sess.save(OUT_PATH)
+    sess.save(out_path)
+
+
+def main():
+    os.makedirs(ASSETS_DIR, exist_ok=True)
+    record(RECON_COMMANDS, REPO_ROOT, os.path.join(ASSETS_DIR, "demo.gif"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        build_chain_fixture(os.path.join(tmp, "chain-demo.exe"))
+        record(CHAIN_COMMANDS, tmp, os.path.join(ASSETS_DIR, "demo-chain.gif"))
 
 
 if __name__ == "__main__":

@@ -102,6 +102,8 @@ For a binary that contains a suitable exported symbol and gadgets:
 ropnroll call ./target.exe --target ExitProcess --args 0 --verify --emit json --out chain.json
 ```
 
+![ropnroll building a call chain -- picking a pop-rcx gadget for the argument, laying out the stack, emitting a pwntools payload, then verifying it under Unicorn emulation](https://raw.githubusercontent.com/jordanallred/ropnroll/main/docs/assets/demo-chain.gif)
+
 `--target` accepts a symbol name or numeric address. `--args` accepts
 comma-separated integers. `--verify` prints an emulation report; inspect that
 report before using the output. Export formats are `json`, `raw`, `c`, and

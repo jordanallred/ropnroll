@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-23
+
+### Fixed
+
+- `call --bytes-before-chain`: the x86-64 stack-alignment padding check
+  compared the target word's offset against the wrong residue, so it
+  silently never inserted a padding gadget for the common case of N
+  single-slot `pop reg ; ret` gadgets -- chains built this way could
+  enter the target function at the wrong 16-byte parity and fault the
+  moment it (or anything it calls) used an aligned SSE stack access. Also
+  fixes a related bogus-offset bug for zero-argument calls, and a pad-
+  gadget lookup that searched for a gadget shape the scanner never
+  produces.
+
+### Added
+
+- A warning when `--bytes-before-chain` is omitted on x86-64, instead of
+  silently shipping a chain whose alignment was never corrected either
+  way.
+
 ## [0.3.0] - 2026-09-23
 
 ### Added
@@ -55,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI/publish workflow: test on push/PR, publish to PyPI via trusted
   publishing on `v*` tags.
 
+[0.3.1]: https://github.com/jordanallred/ropnroll/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jordanallred/ropnroll/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jordanallred/ropnroll/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jordanallred/ropnroll/compare/v0.1.0...v0.1.1

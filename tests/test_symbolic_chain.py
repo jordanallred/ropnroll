@@ -224,6 +224,20 @@ def test_to_json_includes_module_and_offset():
     assert words[1]["module"] is None
 
 
+def test_to_json_nulls_value_for_unresolved_word():
+    """A word tagged (module, offset) must not also carry a numeric
+    `value` -- that value is only the file's own preferred-base address,
+    not a real runtime one, and a consumer resolving base + offset itself
+    must not be able to mistake it for an already-resolved address."""
+    import json
+
+    words = json.loads(output.to_json(_mixed_chain()))
+    assert words[0]["module"] == "kernel32.dll"
+    assert words[0]["value"] is None
+    assert words[1]["module"] is None
+    assert words[1]["value"] == 0x41414141
+
+
 def test_to_raw_refuses_unresolved_chain():
     with pytest.raises(ValueError, match="kernel32.dll"):
         output.to_raw(_mixed_chain())

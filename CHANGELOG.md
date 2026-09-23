@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-09-23
+
+### Fixed
+
+- `to_json`: an unresolved chain word (tagged `module`/`offset` because its
+  runtime base isn't known yet) also carried a numeric `value` -- the
+  binary's own linker-preferred-base address, which looks like a resolved
+  runtime address but isn't one. A consumer resolving `module`+`offset`
+  itself could read `value` instead and silently bake in the wrong
+  address once ASLR actually relocated the module. `value` is now `null`
+  whenever `module`/`offset` are set, matching `to_pwntools`'s existing
+  behavior.
+
 ## [0.3.2] - 2026-09-23
 
 ### Added

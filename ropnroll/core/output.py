@@ -89,9 +89,20 @@ def to_c_array(
 
 
 def to_json(chain: Chain) -> str:
+    """`value` is null whenever `module`/`offset` are set: a consumer
+    resolving those itself (base + offset) must not also see the file's
+    own linker-preferred-base address sitting in `value`, which looks
+    like a real resolved address but isn't one -- see the ChainWord
+    docstring in solve/chain.py. `value` is only ever a number for a word
+    that's actually resolved (or a plain literal, e.g. a stack fill)."""
     return json.dumps(
         [
-            {"value": w.value, "label": w.label, "module": w.module, "offset": w.offset}
+            {
+                "value": None if w.module is not None else w.value,
+                "label": w.label,
+                "module": w.module,
+                "offset": w.offset,
+            }
             for w in chain.words
         ],
         indent=2,

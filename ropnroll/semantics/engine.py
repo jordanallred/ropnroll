@@ -271,6 +271,51 @@ class SemanticEngine:
         write_width.setdefault(self.ai.sp_reg, self.width_bytes)
         return read_regs, written_regs, pointer_regs, write_width
 
+    def dst_read_deps(self, gadget: Gadget) -> dict[str, set[str]]:
+        """For each GPR the gadget writes, the *other* GPRs (excluding the
+        stack pointer) read by whichever instruction actually writes it.
+
+        `compute()`'s trial design fits one candidate `src` register at a
+        time while holding every other GPR the gadget reads at a fixed
+        baseline (see module docstring). That's exact when a destination
+        genuinely depends on only that one register, but for a real
+        two-register op like `or rcx, rax` (which reads *and* writes rcx),
+        the fitted relation just reflects rcx's arbitrary fixed baseline
+        during those trials, not a universal law -- unsound to reuse
+        outside this one gadget. This lets a caller (chain search) check,
+        per destination, whether its measured `src` really is the *only*
+        GPR involved before composing it with another gadget's effect."""
+        deps: dict[str, set[str]] = {}
+        gpr_set = set(self.ai.gpr) | {self.ai.sp_reg}
+        mem_type = _MEM_OP_TYPE.get(self.ai.cs_arch)
+        for insn in gadget.insns:
+            try:
+                regs_read, regs_written = insn.regs_access()
+            except Exception:
+                regs_read, regs_written = [], []
+            read_here: set[str] = set()
+            for r in regs_read:
+                n = self._reg_name(insn, r)
+                if n in gpr_set:
+                    read_here.add(n)
+            for op in getattr(insn, "operands", []):
+                mem = op.mem if (mem_type is not None and op.type == mem_type) else None
+                if mem is not None:
+                    for fld in ("base", "index"):
+                        rid = getattr(mem, fld, 0)
+                        if rid:
+                            n = self._reg_name(insn, rid)
+                            if n and n in gpr_set:
+                                read_here.add(n)
+            written_here = set()
+            for r in regs_written:
+                n = self._reg_name(insn, r)
+                if n in gpr_set:
+                    written_here.add(n)
+            for w in written_here:
+                deps.setdefault(w, set()).update(read_here - {self.ai.sp_reg})
+        return deps
+
     # ---- trial execution ----------------------------------------------
     def _basis_for(self, role: str, lane_index: int, variant: int) -> int:
         if role == "sp":

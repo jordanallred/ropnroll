@@ -43,8 +43,17 @@ class Query:
     k: int = 1
     c: int = 0
 
-    def matches_reg_effect(self, eff) -> bool:
+    def matches_reg_effect(self, eff, width: int | None = None) -> bool:
         if eff is None or eff.kind != self.kind:
+            return False
+        # A query like `rdx=rcx` means a genuine full-width copy. A gadget
+        # that only writes the low 32 bits (e.g. `mov edx, ecx`) zero-
+        # extends on x86-64 -- its effect fits the same (kind, src, k, c)
+        # formula on those 32 bits, but the *real* result differs from a
+        # true 64-bit copy whenever the source's upper bits are nonzero. So
+        # a sub-width effect must never satisfy a full-width query -- pass
+        # `width` (the architecture's register width) to enforce that.
+        if width is not None and eff.size != width:
             return False
         if self.kind == EKind.CONST:
             return (eff.c & eff.mask()) == (self.c & eff.mask())
@@ -98,6 +107,7 @@ def search(pool, query_text: str, limit: int = 20) -> list[tuple]:
         candidates = pool.shortlist_mem_write()
     else:
         candidates = pool.shortlist_touching(q.dst)
+    width = pool.ai.reg_width if pool.ai else None
     for g in candidates:
         eff = pool.effect_of(g)
         if not eff.ok:
@@ -107,13 +117,13 @@ def search(pool, query_text: str, limit: int = 20) -> list[tuple]:
                 if (
                     mw.addr.src == q.dst
                     and mw.addr.c == q.dst_mem_offset
-                    and q.matches_reg_effect(mw.value)
+                    and q.matches_reg_effect(mw.value, width=width)
                 ):
                     results.append((g, eff, f"*({q.dst}+{q.dst_mem_offset:#x})"))
                     break
         else:
             reff = eff.reg_effects.get(q.dst)
-            if q.matches_reg_effect(reff):
+            if q.matches_reg_effect(reff, width=width):
                 results.append((g, eff, q.dst))
         if len(results) >= limit:
             break

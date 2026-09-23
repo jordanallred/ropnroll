@@ -13,7 +13,7 @@ from rich.table import Table
 
 from ..core import badchars, loader, output, pattern, scanner, security
 from ..semantics import query as querymod
-from ..solve import callchain, jop, pivot
+from ..solve import callchain, chainsearch, jop, pivot
 from ..solve.pool import GadgetPool
 from ..verify.emulate import verify_chain
 
@@ -272,18 +272,45 @@ def cmd_search(args):
         except ValueError as e:
             _fail(str(e))
             sys.exit(1)
-    if not results:
+    sp_reg = pool.ai.sp_reg if pool.ai else ""
+    if results:
+        console.print(_QUALITY_LEGEND)
+        console.print(
+            _gadget_table(
+                f"gadgets matching {args.query!r}", results, pool, sp_reg, extra_col="matched"
+            )
+        )
+        console.print(
+            f"[bold]{len(results)}[/bold] match(es), best-first (fewest instructions, then address)"
+        )
+        return
+
+    if args.max_depth <= 1:
         _warn("no gadgets matched")
         return
-    sp_reg = pool.ai.sp_reg if pool.ai else ""
-    console.print(_QUALITY_LEGEND)
+
+    with console.status("[dim]searching for a gadget chain...[/dim]"):
+        try:
+            chains = chainsearch.search_chain(
+                pool, args.query, max_depth=args.max_depth, limit=args.limit
+            )
+        except ValueError as e:
+            _warn("no gadgets matched")
+            _warn(f"chain search skipped: {e}")
+            return
+    if not chains:
+        _warn(f"no gadgets matched, and no chain up to depth {args.max_depth} found")
+        return
+    for i, result in enumerate(chains, 1):
+        t = _table(f"chain {i}/{len(chains)} satisfying {args.query!r}")
+        t.add_column("#", justify="right")
+        t.add_column("address", style="bold")
+        t.add_column("gadget")
+        for j, g in enumerate(result.hops, 1):
+            t.add_row(str(j), _addr_str(g.address, pool), escape(g.text))
+        console.print(t)
     console.print(
-        _gadget_table(
-            f"gadgets matching {args.query!r}", results, pool, sp_reg, extra_col="matched"
-        )
-    )
-    console.print(
-        f"[bold]{len(results)}[/bold] match(es), best-first (fewest instructions, then address)"
+        f"[bold]{len(chains)}[/bold] chain(s) found, up to depth {args.max_depth}"
     )
 
 
@@ -677,7 +704,18 @@ def build_parser() -> argparse.ArgumentParser:
         "search",
         parents=[common],
         help="search gadgets by their measured effect on registers or memory",
-        epilog="example:\n  ropnroll search ./target --query 'rdi=rax+8'",
+        description="Search for a single gadget matching --query. If none exists and "
+        "--max-depth is above 1, fall back to a bounded search for a *chain* of "
+        "register-to-register relay gadgets whose combined effect satisfies the "
+        "query (e.g. rax copied into rbx, then rbx into rcx, when no gadget sets "
+        "rcx from rax directly). Chain search only composes gadgets whose "
+        "measured effect depends on exactly one source register -- a gadget like "
+        "'or rcx, rax' genuinely depends on two, so it's excluded automatically "
+        "(the measured relation there isn't safe to chain) and is left for a "
+        "human to combine with an identity trick, e.g. zero the register first.",
+        epilog="examples:\n"
+        "  ropnroll search ./target --query 'rdi=rax+8'\n"
+        "  ropnroll search ./target --query 'rcx=rax' --max-depth 3",
     )
     s.add_argument("binary", nargs="+", help="binaries to pool gadgets from")
     s.add_argument(
@@ -685,6 +723,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="EXPR",
         help='effect to match, e.g. "rdi=rax+8", "[rbx]=rax", "rax=0"',
+    )
+    s.add_argument(
+        "--max-depth",
+        type=int,
+        default=1,
+        metavar="N",
+        help="when no single gadget matches, search chains up to this many "
+        "gadgets long (default: 1, i.e. single-gadget only)",
     )
     s.add_argument(
         "--limit",

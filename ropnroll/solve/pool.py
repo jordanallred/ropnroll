@@ -72,6 +72,10 @@ class GadgetPool:
         eng = self._engines[g.module]
         return eng.compute(g)
 
+    def dst_read_deps(self, g: Gadget) -> dict[str, set[str]]:
+        eng = self._engines[g.module]
+        return eng.dst_read_deps(g)
+
     def image_of(self, module: str) -> Image | None:
         """The Image a gadget/symbol address came from, keyed the same way
         Gadget.module is set (img.path) -- used to decide whether an

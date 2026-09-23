@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +7,27 @@ name = "ropnroll"
 version = "0.3.0"
 description = "Semantic ROP/JOP gadget finder and automatic exploit-chain synthesizer for Windows PE binaries"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Jordan Allred", email = "jallredxc@gmail.com" },
+]
 keywords = ["rop", "jop", "gadgets", "binary-analysis", "security", "windows", "pe"]
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+]
 dependencies = [
     "capstone>=5.0",
     "lief>=0.14",
@@ -20,6 +39,7 @@ dependencies = [
 Homepage = "https://github.com/jordanallred/ropnroll"
 Repository = "https://github.com/jordanallred/ropnroll"
 Issues = "https://github.com/jordanallred/ropnroll/issues"
+Changelog = "https://github.com/jordanallred/ropnroll/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

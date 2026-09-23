@@ -100,6 +100,12 @@ def test_append_gadget_block_tags_symbolic_when_base_unknown():
     assert word.value == g.address
     assert word.module == img.path
     assert word.offset == g.address - img.image_base
+    # the label is a human-readable comment, not a resolvable field, but it
+    # must not show the raw address either -- that's the file's own
+    # preferred-base value, exactly what `value` is null'd elsewhere to
+    # avoid presenting as something it isn't.
+    assert f"0x{g.address:x}" not in word.label
+    assert f"+0x{word.offset:x}" in word.label
 
 
 def test_append_gadget_block_resolved_when_base_known():
@@ -117,6 +123,7 @@ def test_append_gadget_block_resolved_when_base_known():
     assert word.value == g.address
     assert word.module is None
     assert word.offset is None
+    assert f"0x{g.address:x}" in word.label
 
 
 def test_set_last_gadget_tags_symbolic():
@@ -173,6 +180,8 @@ def test_call_target_symbolic_without_base_then_resolved_after_rebase():
     assert call_word.value == target
     assert call_word.module == img.path
     assert call_word.offset == 0x1234
+    assert f"0x{target:x}" not in call_word.label
+    assert "+0x1234" in call_word.label
 
     new_base = 0x7FFB00000000
     pool2, images2 = _load_pool(
@@ -188,6 +197,7 @@ def test_call_target_symbolic_without_base_then_resolved_after_rebase():
     assert call_word2.value == target2
     assert call_word2.module is None
     assert call_word2.offset is None
+    assert f"0x{target2:x}" in call_word2.label
 
 
 # ---- output.py: export formats ----------------------------------------

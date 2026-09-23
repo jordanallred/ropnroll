@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from ..core.archinfo import ArchInfo
 from ..core.gadget import Terminator
 from ..core.loader import Image
-from .chain import Chain, ChainWord, SolveResult, _mk, _tag, set_registers
+from .chain import Chain, ChainWord, SolveResult, _addr_label, _mk, _tag, set_registers
 from .pool import GadgetPool
 
 # Microsoft x64 ABI: RCX, RDX, R8, R9 (not SysV's RDI/RSI/RDX/RCX/R8/R9),
@@ -152,7 +152,7 @@ def build_call(
                         module, offset = _tag(pool, rets[0].module, pad_addr)
                         chain.set_last(
                             pad_addr,
-                            f"alignment pad (bare ret) 0x{pad_addr:x}",
+                            f"alignment pad (bare ret) {_addr_label(pad_addr, module, offset)}",
                             module=module,
                             offset=offset,
                         )
@@ -160,7 +160,10 @@ def build_call(
 
         t_module, t_offset = _tag(pool, target_module, target)
         chain.set_last(
-            target, f"call target 0x{target:x}", module=t_module, offset=t_offset
+            target,
+            f"call target {_addr_label(target, t_module, t_offset)}",
+            module=t_module,
+            offset=t_offset,
         )
         if ai.arch == "x86_64" and pool.os == "windows":
             for i in range(_MS64_SHADOW_SPACE // ai.reg_width):
@@ -177,7 +180,12 @@ def build_call(
         chain = Chain(ai=ai)
         t_module, t_offset = _tag(pool, target_module, target)
         chain.words.append(
-            _mk(target, f"call target 0x{target:x}", module=t_module, offset=t_offset)
+            _mk(
+                target,
+                f"call target {_addr_label(target, t_module, t_offset)}",
+                module=t_module,
+                offset=t_offset,
+            )
         )
         if return_to is not None:
             chain.append_raw(return_to, f"return address after call 0x{return_to:x}")

@@ -14,6 +14,7 @@ from __future__ import annotations
 import heapq
 import itertools
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..core.archinfo import ArchInfo
 from ..core.gadget import Gadget
@@ -72,6 +73,20 @@ def _mk(
     )
 
 
+def _addr_label(address: int, module: str | None, offset: int | None) -> str:
+    """Human-readable address text for a word's label. A still-symbolic
+    word (module/offset set) must not show `address` -- that's just the
+    file's own preferred-base value, which is exactly the kind of
+    looks-resolved-but-isn't number `value` is already null'd to avoid
+    (see ChainWord docstring); the label showing it right back in plain
+    text would undo that. Show the base-invariant module+offset instead,
+    and only fall back to the real address once it's actually known."""
+    if module is not None and offset is not None:
+        sign = "+" if offset >= 0 else "-"
+        return f"{Path(module).stem}{sign}0x{abs(offset):x}"
+    return f"0x{address:x}"
+
+
 def _tag(
     pool: GadgetPool | None, module: str, address: int
 ) -> tuple[str | None, int | None]:
@@ -101,7 +116,7 @@ class Chain:
         self.words.append(
             _mk(
                 gadget.address,
-                f"0x{gadget.address:x}: {gadget.text}",
+                f"{_addr_label(gadget.address, module, offset)}: {gadget.text}",
                 module=module,
                 offset=offset,
             )

@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-09-23
+
+### Fixed
+
+- A symbolic (module/offset) chain word's `label` still embedded the
+  binary's own preferred-base address (e.g. `0x1400025c1: pop rcx ; ret`)
+  even though `value` was already null'd for exactly that word --
+  `to_json`, `to_pwntools`, and `stack_layout` all echo `label` verbatim,
+  so the address `value`/`to_raw` are guarded against leaked right back
+  out through the one field nothing was checking. Labels for a still-
+  symbolic word now show the base-invariant `module+offset` instead (e.g.
+  `Socks4Server_03+0x25c1: pop rcx ; ret`), matching the address only once
+  a real base is actually known.
+
+### Changed
+
+- CLI output is now Rich tables throughout instead of a mix of tables and
+  hand-formatted lines: `scan`/`search` render gadgets as a table (with a
+  quality legend) instead of one `console.print` per line, `security`/
+  `pivot`/`jop` share one rounded-box table style, and status lines go
+  through new `_ok`/`_warn`/`_fail` helpers for a consistent ✓/⚠/✗ prefix.
+  `call`'s stack-layout output is now a colorized table -- placeholder
+  (red), symbolic (yellow), resolved (green), unfilled (dim) -- backed by
+  two new reusable helpers in `core/output.py`, `word_kind` and
+  `word_value_str`, so a value's status is visible at a glance instead of
+  requiring a second look at the surrounding text. Verification output
+  (`--verify`) now uses a `Rule` header and a bordered PASS/FAIL `Panel`.
+
 ## [0.3.4] - 2026-09-23
 
 ### Added

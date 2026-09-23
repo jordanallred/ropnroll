@@ -4,8 +4,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from rich import box
 from rich.console import Console
 from rich.markup import escape
+from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
 
 from ..core import badchars, loader, output, pattern, scanner, security
@@ -16,6 +19,28 @@ from ..verify.emulate import verify_chain
 
 console = Console()
 err_console = Console(stderr=True)
+
+# One box/header style for every table this CLI prints, so scan results,
+# the security report, pivots, and dispatchers all read as the same tool
+# rather than a patchwork of ad hoc formatting.
+_BOX = box.ROUNDED
+_TABLE_STYLE = dict(box=_BOX, header_style="bold cyan", title_style="bold", title_justify="left")
+
+
+def _table(title: str) -> Table:
+    return Table(title=title, **_TABLE_STYLE)
+
+
+def _ok(msg: str) -> None:
+    console.print(f"[green]✓[/green] {msg}")
+
+
+def _warn(msg: str) -> None:
+    console.print(f"[yellow]⚠[/yellow] {msg}")
+
+
+def _fail(msg: str) -> None:
+    console.print(f"[red]✗[/red] {msg}")
 
 
 def _parse_base_overrides(values: list[str] | None) -> dict[str, int]:
@@ -41,7 +66,7 @@ def _load_pool(
             use_cache=use_cache, bad_chars=badchars.parse_bad_chars(bad_chars)
         )
     except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+        _fail(str(e))
         sys.exit(1)
     images = []
     try:
@@ -54,7 +79,7 @@ def _load_pool(
             pool.add(img, gs)
             images.append(img)
     except (ValueError, FileNotFoundError, OSError) as e:
-        console.print(f"[red]{e}[/red]")
+        _fail(str(e))
         sys.exit(1)
     return pool, images
 
@@ -127,15 +152,46 @@ def _quality_style(eff, sp_reg: str = "") -> str:
     return "dim"
 
 
-def _gadget_line(
-    addr: str, text: str, n_insns: int, eff, sp_reg: str, text_width: int = 42
-) -> str:
-    line = (
-        f"{addr}  {escape(text.ljust(text_width))}  "
-        f"instrs={n_insns:<2} clobbers={_clobbers_str(eff, sp_reg):<18} sp={_sp_str(eff)}"
-    )
-    style = _quality_style(eff, sp_reg)
-    return f"[{style}]{line}[/{style}]" if style else line
+_QUALITY_LEGEND = (
+    "[dim]quality —[/dim] "
+    "[bold green]clean[/bold green] "
+    "[dim]·[/dim] light clobbers "
+    "[dim]·[/dim] [dim]heavy clobbers[/dim] "
+    "[dim]·[/dim] [yellow]sp unknown[/yellow] "
+    "[dim]·[/dim] [red]fault[/red]"
+)
+
+
+def _gadget_table(
+    title: str,
+    rows: list[tuple],
+    pool: GadgetPool,
+    sp_reg: str,
+    extra_col: str | None = None,
+) -> Table:
+    """rows is [(gadget, effect), ...] or, with extra_col set, [(gadget,
+    effect, extra_value), ...] -- e.g. search's matched field."""
+    t = _table(title)
+    t.add_column("address", style="bold")
+    t.add_column("gadget")
+    t.add_column("instrs", justify="right")
+    t.add_column("clobbers")
+    t.add_column("sp", justify="right")
+    if extra_col:
+        t.add_column(extra_col)
+    for row in rows:
+        g, eff = row[0], row[1]
+        cells = [
+            _addr_str(g.address, pool),
+            escape(g.text),
+            str(g.n_insns),
+            _clobbers_str(eff, sp_reg),
+            _sp_str(eff),
+        ]
+        if extra_col:
+            cells.append(escape(str(row[2])))
+        t.add_row(*cells, style=_quality_style(eff, sp_reg) or None)
+    return t
 
 
 def cmd_scan(args):
@@ -165,24 +221,19 @@ def cmd_scan(args):
                         f"{_addr_str(g.address, pool)} : {g.text:<42} "
                         f"instrs={g.n_insns} clobbers={_clobbers_str(eff, sp_reg)} sp={_sp_str(eff)}\n"
                     )
-        console.print(
-            f"[green]wrote {len(gadgets)} gadgets to {args.out}[/green], sorted {_sort_note(args.sort)}"
-        )
+        _ok(f"wrote {len(gadgets)} gadgets to {args.out}, sorted {_sort_note(args.sort)}")
         return
 
     shown = gadgets[: args.limit]
-    header = f"gadgets: {args.binary}" + (
+    title = f"gadgets: {args.binary}" + (
         f" matching /{args.regex}/" if args.regex else ""
     )
-    console.print(f"[bold]{header}[/bold]")
-    for g in shown:
-        eff = pool.effect_of(g)
-        console.print(
-            _gadget_line(_addr_str(g.address, pool), g.text, g.n_insns, eff, sp_reg)
-        )
+    console.print(_QUALITY_LEGEND)
+    rows = [(g, pool.effect_of(g)) for g in shown]
+    console.print(_gadget_table(title, rows, pool, sp_reg))
     console.print(
         f"[bold]{len(gadgets)}[/bold] gadgets total, sorted {_sort_note(args.sort)}"
-        + (f" -- showing top {args.limit}" if len(gadgets) > args.limit else "")
+        + (f" [dim]-- showing top {args.limit}[/dim]" if len(gadgets) > args.limit else "")
     )
 
 
@@ -193,14 +244,14 @@ def cmd_security(args):
         if args.binary in overrides:
             img = img.rebase(overrides[args.binary])
     except (ValueError, FileNotFoundError, OSError) as e:
-        console.print(f"[red]{e}[/red]")
+        _fail(str(e))
         sys.exit(1)
     opts = _scan_opts(args)
     with console.status("[dim]scanning...[/dim]"):
         gs = scanner.scan_image(img, opts, use_cache=not args.no_cache)
     report = security.build_report(img, gs)
-    t = Table(title=f"security report: {args.binary}")
-    t.add_column("property")
+    t = _table(f"security report: {args.binary}")
+    t.add_column("property", style="bold")
     t.add_column("value")
     for k, v, style in report.lines:
         t.add_row(k, f"[{style}]{escape(v)}[/{style}]" if style else escape(v))
@@ -219,17 +270,18 @@ def cmd_search(args):
         try:
             results = querymod.search(pool, args.query, limit=args.limit)
         except ValueError as e:
-            console.print(f"[red]{e}[/red]")
+            _fail(str(e))
             sys.exit(1)
     if not results:
-        console.print("[yellow]no gadgets matched[/yellow]")
+        _warn("no gadgets matched")
         return
     sp_reg = pool.ai.sp_reg if pool.ai else ""
-    console.print(f"[bold]gadgets matching {args.query!r}[/bold]")
-    for g, eff, field in results:
-        console.print(
-            _gadget_line(_addr_str(g.address, pool), g.text, g.n_insns, eff, sp_reg)
+    console.print(_QUALITY_LEGEND)
+    console.print(
+        _gadget_table(
+            f"gadgets matching {args.query!r}", results, pool, sp_reg, extra_col="matched"
         )
+    )
     console.print(
         f"[bold]{len(results)}[/bold] match(es), best-first (fewest instructions, then address)"
     )
@@ -245,8 +297,8 @@ def cmd_pivot(args):
             bad_chars=args.bad_chars,
         )
         pivots = pivot.find_pivots(pool)
-    t = Table(title="stack pivots (best-first)")
-    t.add_column("address")
+    t = _table("stack pivots (best-first)")
+    t.add_column("address", style="bold")
     t.add_column("gadget")
     t.add_column("instrs", justify="right")
     t.add_column("kind")
@@ -260,7 +312,7 @@ def cmd_pivot(args):
     console.print(t)
     console.print(
         f"[bold]{len(pivots)}[/bold] pivot(s) found"
-        + (f" -- showing top {args.limit}" if len(pivots) > args.limit else "")
+        + (f" [dim]-- showing top {args.limit}[/dim]" if len(pivots) > args.limit else "")
     )
 
 
@@ -274,10 +326,10 @@ def cmd_jop(args):
             bad_chars=args.bad_chars,
         )
         disp = jop.find_dispatchers(pool, img=images[0])
-    t = Table(
-        title="JOP dispatcher gadgets (self-advancing jmp/call-through-register, best-first)"
+    t = _table(
+        "JOP dispatcher gadgets (self-advancing jmp/call-through-register, best-first)"
     )
-    t.add_column("address")
+    t.add_column("address", style="bold")
     t.add_column("gadget")
     t.add_column("instrs", justify="right")
     t.add_column("reg")
@@ -293,7 +345,7 @@ def cmd_jop(args):
     console.print(t)
     console.print(
         f"[bold]{len(disp)}[/bold] dispatcher(s) found"
-        + (f" -- showing top {args.limit}" if len(disp) > args.limit else "")
+        + (f" [dim]-- showing top {args.limit}[/dim]" if len(disp) > args.limit else "")
     )
 
 
@@ -301,18 +353,18 @@ def _note_unresolved(chain):
     unresolved = output.unresolved_modules(chain)
     if unresolved:
         mods = ", ".join(Path(m).name for m in unresolved)
-        console.print(
-            f"[yellow]chain has symbolic addresses for: {mods} (base not known yet -- "
+        _warn(
+            f"chain has symbolic addresses for: {mods} (base not known yet -- "
             f"pass --base <module>=0xADDR once you have a leak, or use "
-            f"--emit pwntools/json for a template that resolves them at exploit time)[/yellow]"
+            f"--emit pwntools/json for a template that resolves them at exploit time)"
         )
 
 
 def _note_chain_warnings(chain, bad_chars: frozenset[int]):
     for w in chain.warnings:
-        console.print(f"[yellow]warning: {w}[/yellow]")
+        _warn(w)
     for w in badchars.chain_bad_char_warnings(chain, bad_chars):
-        console.print(f"[yellow]warning: {w}[/yellow]")
+        _warn(w)
 
 
 def _emit(chain, fmt: str, out: str | None):
@@ -328,41 +380,73 @@ def _emit(chain, fmt: str, out: str | None):
             if out:
                 with open(out, "wb") as f:
                     f.write(data)
-                console.print(f"[green]wrote {len(data)} raw bytes to {out}[/green]")
+                _ok(f"wrote {len(data)} raw bytes to {out}")
             else:
                 sys.stdout.buffer.write(data)
             return
         else:
             raise ValueError(fmt)
     except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+        _fail(str(e))
         sys.exit(1)
     if out:
         with open(out, "w") as f:
             f.write(text)
-        console.print(f"[green]wrote to {out}[/green]")
+        _ok(f"wrote to {out}")
     else:
         console.print(text, markup=False)
 
 
+_WORD_KIND_STYLE = {
+    "placeholder": "bold red",
+    "symbolic": "yellow",
+    "resolved": "green",
+    "unfilled": "dim",
+}
+
+
+def _stack_layout_table(chain, title: str) -> Table:
+    w = chain.ai.reg_width
+    t = _table(title)
+    t.add_column("offset", style="dim")
+    t.add_column("value")
+    t.add_column("purpose")
+    for i, word in enumerate(chain.words):
+        val = escape(output.word_value_str(word, w))
+        style = _WORD_KIND_STYLE[output.word_kind(word)]
+        t.add_row(
+            f"+0x{i * w:04x}",
+            f"[{style}]{val}[/{style}]",
+            escape(word.label),
+        )
+    return t
+
+
 def _do_verify(images, chain, final_target, goal_regs):
     rep = verify_chain(images, chain, final_target=final_target, goal_regs=goal_regs)
-    console.print("\n[bold]-- concrete verification (Unicorn) --[/bold]")
+    console.print()
+    console.print(Rule("concrete verification (Unicorn)", style="cyan"))
     console.print(
         f"reached target: {rep.reached_target}   fault: {rep.fault}   "
         f"instructions executed: {rep.instructions_executed}"
     )
     for reg, (ok, want, got) in rep.goal_results.items():
-        mark = "[green]OK[/green]" if ok else "[red]MISMATCH[/red]"
+        mark = "[green]✓ OK[/green]" if ok else "[red]✗ MISMATCH[/red]"
         console.print(
             f"  {reg}: expected 0x{want:x}, got "
             f"{'0x%x' % got if got is not None else '?'}  {mark}"
         )
     if rep.fault:
-        console.print(
-            f"[red]fault at 0x{rep.fault_address:x} near: {rep.last_gadget_context}[/red]"
+        _fail(f"fault at 0x{rep.fault_address:x} near: {rep.last_gadget_context}")
+    verdict_style = "bold green" if rep.ok else "bold red"
+    console.print(
+        Panel(
+            "PASS" if rep.ok else "FAIL",
+            style=verdict_style,
+            border_style=verdict_style,
+            expand=False,
         )
-    console.print(f"[bold]{'PASS' if rep.ok else 'FAIL'}[/bold]")
+    )
 
 
 def cmd_call(args):
@@ -387,7 +471,7 @@ def cmd_call(args):
                     target_module = img.path
                     break
             if target is None:
-                console.print(f"[red]symbol {args.target!r} not found[/red]")
+                _fail(f"symbol {args.target!r} not found")
                 sys.exit(1)
         args_list = [int(a, 0) for a in args.args.split(",")] if args.args else []
         res = callchain.build_call(
@@ -401,11 +485,9 @@ def cmd_call(args):
     for l in res.solve.log:
         console.print(f"[dim]{l}[/dim]")
     if not res.ok:
-        console.print(
-            f"[red]could not build call chain; unresolved: {res.solve.unresolved}[/red]"
-        )
+        _fail(f"could not build call chain; unresolved: {res.solve.unresolved}")
         sys.exit(1)
-    console.print(output.stack_layout(res.chain), markup=False)
+    console.print(_stack_layout_table(res.chain, f"stack layout — call {args.target}"))
     _note_unresolved(res.chain)
     _note_chain_warnings(res.chain, pool.bad_chars)
     if args.emit:
@@ -420,16 +502,14 @@ def cmd_pattern_create(args):
     if args.out:
         with open(args.out, "wb") as f:
             f.write(data)
-        console.print(
-            f"[green]wrote {len(data)}-byte cyclic pattern to {args.out}[/green]"
-        )
+        _ok(f"wrote {len(data)}-byte cyclic pattern to {args.out}")
     else:
         sys.stdout.buffer.write(data)
     if args.length > pattern.PERIOD:
         err_console.print(
-            f"[yellow]length {args.length} exceeds the pattern's {pattern.PERIOD}-byte "
-            f"period -- it repeats past 0x{pattern.PERIOD:x}, so an offset found beyond "
-            f"that point is ambiguous[/yellow]"
+            f"[yellow]⚠[/yellow] length {args.length} exceeds the pattern's "
+            f"{pattern.PERIOD}-byte period -- it repeats past 0x{pattern.PERIOD:x}, so an "
+            f"offset found beyond that point is ambiguous"
         )
 
 
@@ -437,12 +517,12 @@ def cmd_pattern_offset(args):
     try:
         off = pattern.offset(args.value, width=args.width, literal=args.text)
     except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+        _fail(str(e))
         sys.exit(1)
     if off is None:
-        console.print(
-            f"[red]{args.value!r} not found in the first "
-            f"0x{pattern.PERIOD:x} bytes of the pattern[/red]"
+        _fail(
+            f"{args.value!r} not found in the first "
+            f"0x{pattern.PERIOD:x} bytes of the pattern"
         )
         sys.exit(1)
     console.print(f"offset: [bold]{off}[/bold] (0x{off:x})")

@@ -134,21 +134,39 @@ def to_json(chain: Chain) -> str:
     )
 
 
+def word_kind(w: ChainWord) -> str:
+    """Which of the four buckets a word's value falls into -- exposed so a
+    fancier renderer (e.g. a colorized CLI table) can style each row
+    without reimplementing the placeholder/symbolic/resolved/unfilled
+    rules that _word_expr and stack_layout already encode."""
+    if w.placeholder:
+        return "placeholder"
+    if w.module is not None and w.offset is not None:
+        return "symbolic"
+    if w.value is not None:
+        return "resolved"
+    return "unfilled"
+
+
+def word_value_str(word: ChainWord, reg_width: int) -> str:
+    """The textual value stack_layout shows for one word, on its own so a
+    caller building its own display (e.g. a Rich table) doesn't have to
+    duplicate this formatting."""
+    if word.placeholder:
+        return "PLACEHOLDER"
+    if word.module is not None and word.offset is not None:
+        return _word_expr(word)
+    if word.value is not None:
+        return f"0x{word.value:0{reg_width * 2}x}"
+    return "?" * (reg_width * 2)
+
+
 def stack_layout(chain: Chain, base_label: str = "rsp+") -> str:
     """ASCII stack-layout visualizer -- every slot, offset, and why it's
     there, so you can eyeball a chain before you ever fire it."""
     w = chain.ai.reg_width
 
-    def _val_str(word: ChainWord) -> str:
-        if word.placeholder:
-            return "PLACEHOLDER"
-        if word.module is not None and word.offset is not None:
-            return _word_expr(word)
-        if word.value is not None:
-            return f"0x{word.value:0{w * 2}x}"
-        return "?" * (w * 2)
-
-    vals = [_val_str(word) for word in chain.words]
+    vals = [word_value_str(word, w) for word in chain.words]
     # a symbolic "module_base + 0xoffset" expression can run much longer
     # than a fixed-width hex word, so size the column off the actual
     # longest value in *this* chain rather than assuming raw hex width --

@@ -14,7 +14,6 @@ class Terminator(Enum):
     JMP_MEM = auto()
     CALL_MEM = auto()
     SYSCALL = auto()
-    INT80 = auto()
     OTHER = auto()
 
 

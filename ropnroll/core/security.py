@@ -80,9 +80,7 @@ def build_report(img: Image, gadgets: list[Gadget]) -> SecurityReport:
     entropy_val, entropy_style = _mitigation(m.get("high_entropy_va"))
     lines.append(("ASLR high-entropy (/HIGH_ENTROPY_VA)", entropy_val, entropy_style))
 
-    n_sys = sum(
-        1 for g in gadgets if g.terminator in (Terminator.SYSCALL, Terminator.INT80)
-    )
+    n_sys = sum(1 for g in gadgets if g.terminator == Terminator.SYSCALL)
     n_jop = sum(
         1
         for g in gadgets
@@ -97,7 +95,7 @@ def build_report(img: Image, gadgets: list[Gadget]) -> SecurityReport:
     # gadget counts are an opportunity, not a threat -- style them green when
     # nonzero (usable) and dim when empty (this avenue is a dead end here).
     lines.append(("gadgets found", str(len(gadgets)), "green" if gadgets else "dim"))
-    lines.append(("  syscall/int0x80 gadgets", str(n_sys), "green" if n_sys else "dim"))
+    lines.append(("  syscall gadgets", str(n_sys), "green" if n_sys else "dim"))
     lines.append(("  JOP-terminated gadgets", str(n_jop), "green" if n_jop else "dim"))
     if img.cfg_valid_targets:
         lines.append(

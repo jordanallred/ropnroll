@@ -69,13 +69,6 @@ def _classify_x86(insn) -> Terminator | None:
         return Terminator.SYSCALL
     if m == "int3":
         return None
-    if (
-        m == "int"
-        and insn.operands
-        and insn.operands[0].type == cs.x86.X86_OP_IMM
-        and insn.operands[0].imm == 0x80
-    ):
-        return Terminator.INT80
     if m in _JUMP_MNEM and insn.operands:
         op = insn.operands[0]
         if op.type == cs.x86.X86_OP_REG:
@@ -170,7 +163,7 @@ def _wanted(term: Terminator, opts: ScanOptions) -> bool:
         Terminator.CALL_MEM,
     ):
         return opts.jop
-    if term in (Terminator.SYSCALL, Terminator.INT80):
+    if term == Terminator.SYSCALL:
         return opts.sys
     return False
 
@@ -284,12 +277,12 @@ def _scan_x86_offsets(
                 if bad:
                     ok = False
                     break
-                # syscall/int0x80 don't divert control flow (the kernel
-                # returns to the very next instruction), so unlike a
-                # ret/jmp/call they're safe to have mid-body -- rejecting
-                # them here would mean "syscall ; ret" could never be found
-                # as a single gadget, only bare "syscall" ever would.
-                diverts = mid_term not in (None, Terminator.SYSCALL, Terminator.INT80)
+                # syscall doesn't divert control flow (the kernel returns
+                # to the very next instruction), so unlike a ret/jmp/call
+                # it's safe to have mid-body -- rejecting it here would mean
+                # "syscall ; ret" could never be found as a single gadget,
+                # only bare "syscall" ever would.
+                diverts = mid_term not in (None, Terminator.SYSCALL)
                 if diverts and o + insn.size != true_end:
                     # an earlier terminator inside the window -> this start
                     # belongs to a *different*, shorter gadget, not this one
